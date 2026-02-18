@@ -7,7 +7,8 @@ const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVqenhsc3Fsb3BnYXpxa3R1a3BxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2ODU1MTEwNywiZXhwIjoyMDg0MTI3MTA3fQ.GWZ5h3hBclPXCF5TPBNqRPsEEG2hArzkbsW9kgkNJzQ";
 const N8N_WEBHOOK_URL =
   "http://localhost:5678/webhook/11ce44bf-f24d-4086-8a51-ed833a8cc281";
-const TRACKING_API_URL = "http://localhost:3000";
+const TRACKING_API_URL = "https://tracking.f16infotech.com/" 
+// http://localhost:3000";
 
 /** Get template for current step from resolved_templates (or fallback to templates) */
 function getTemplateForStep(
