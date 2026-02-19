@@ -155,25 +155,6 @@ async function runScheduler() {
       continue;
     }
 
-    const repliedRes = await fetch(
-      `${SUPABASE_URL}/functions/v1/get-campaign-queue?action=recipients&campaign_id=${campaign.id}&status=replied`,
-      {
-        headers: {
-          "x-api-key": API_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-    const repliedData = await repliedRes.json();
-
-    if (repliedData.count > 0) {
-      console.log(
-        `  Paused - Campaign has ${repliedData.count} replied recipient(s)`,
-      );
-      return;
-    }
-
     const recipientIds = campaign.pending_recipients.map((r: any) => r.id);
 
     await fetch(`${SUPABASE_URL}/functions/v1/get-campaign-queue`, {
