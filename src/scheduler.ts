@@ -95,9 +95,18 @@ async function generateTracking(params: {
   }
 }
 
+let isRunning = false;
+
 async function runScheduler() {
+  if (isRunning) {
+    console.log(`[${new Date().toISOString()}] Cron skipped — previous run still in progress`);
+    return;
+  }
+
+  isRunning = true;
   console.log(`[${new Date().toISOString()}] Cron job triggered!`);
 
+  try {
   if (!API_KEY || !SUPABASE_KEY) {
     console.error(
       "Missing API_KEY or SUPABASE_SERVICE_KEY / SUPABASE_ANON_KEY",
@@ -286,6 +295,11 @@ async function runScheduler() {
     } else if (emailsToSend.length > 0 && !N8N_WEBHOOK_URL) {
       console.warn("  N8N_WEBHOOK_URL not set — skipping webhook");
     }
+  }
+  } catch (error) {
+    console.error(`[${new Date().toISOString()}] Scheduler error:`, error);
+  } finally {
+    isRunning = false;
   }
 }
 
