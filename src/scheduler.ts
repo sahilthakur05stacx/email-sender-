@@ -8,8 +8,8 @@ const SUPABASE_KEY =
 // const N8N_WEBHOOK_URL =
 //   "http://localhost:5678/webhook/11ce44bf-f24d-4086-8a51-ed833a8cc281";
 const N8N_WEBHOOK_URL =
-  "http://n8n:5678/webhook/11ce44bf-f24d-4086-8a51-ed833a8cc281";
-const TRACKING_API_URL = "https://tracking.f16infotech.com/" 
+  "https://n8n.f16infotech.com/webhook/11ce44bf-f24d-4086-8a51-ed833a8cc281";
+const TRACKING_API_URL = "https://tracking.f16infotech.com" 
 // http://localhost:3000";
 
 /** Get template for current step from resolved_templates (or fallback to templates) */
