@@ -95,6 +95,23 @@ async function generateTracking(params: {
   }
 }
 
+/** Check if current server time is within the contact's allowed sending window (time_from – time_to) */
+function isWithinSendingWindow(timeFrom?: string | null, timeTo?: string | null): boolean {
+  // If no window defined, allow sending anytime
+  if (!timeFrom || !timeTo) return true;
+
+  // Parse "HH:MM" strings
+  const [fromH, fromM] = timeFrom.split(":").map(Number);
+  const [toH, toM] = timeTo.split(":").map(Number);
+
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const fromMinutes = fromH * 60 + fromM;
+  const toMinutes = toH * 60 + toM;
+
+  return currentMinutes >= fromMinutes && currentMinutes <= toMinutes;
+}
+
 /** Get how many emails this sender has already sent today (across all their campaigns) */
 async function getSenderTodayCount(senderId: string): Promise<number> {
   const today = new Date();
@@ -240,6 +257,12 @@ async function runScheduler() {
     for (const recipient of campaign.pending_recipients) {
       const contact = recipient.contact || {};
       const currentStep = recipient.current_step;
+
+      // Sending window check
+      if (!isWithinSendingWindow(contact.time_from, contact.time_to)) {
+        console.log(`\n  ⏰ Skipping ${contact.full_name} — outside sending window (${contact.time_from} – ${contact.time_to})`);
+        continue;
+      }
 
       const templateForStep = getTemplateForStep(recipient, campaign);
 
