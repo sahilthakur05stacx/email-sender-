@@ -95,6 +95,53 @@ async function generateTracking(params: {
   }
 }
 
+/** Get how many emails this sender has already sent today (across all their campaigns) */
+async function getSenderTodayCount(senderId: string): Promise<number> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayISO = today.toISOString();
+
+  try {
+    // Step 1: Get all campaign IDs that belong to this sender
+    const campaignsRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/campaigns?select=id&sender_id=eq.${senderId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          apikey: SUPABASE_KEY,
+        },
+      },
+    );
+    if (!campaignsRes.ok) return 0;
+    const campaigns = await campaignsRes.json();
+    if (!campaigns.length) return 0;
+
+    const campaignIds = campaigns.map((c: any) => c.id).join(",");
+
+    // Step 2: Count email_logs sent today for those campaigns
+    const logsRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/email_logs?select=id&campaign_id=in.(${campaignIds})&sent_at=gte.${todayISO}`,
+      {
+        headers: {
+          Authorization: `Bearer ${SUPABASE_KEY}`,
+          apikey: SUPABASE_KEY,
+          Prefer: "count=exact",
+        },
+      },
+    );
+
+    const contentRange = logsRes.headers.get("content-range");
+    if (contentRange) {
+      const total = contentRange.split("/")[1];
+      return parseInt(total) || 0;
+    }
+    return 0;
+  } catch (err) {
+    console.error(`  Failed to get sender daily count:`, err);
+    return 0;
+  }
+}
+
 let isRunning = false;
 
 async function runScheduler() {
@@ -153,6 +200,25 @@ async function runScheduler() {
     if (!campaign.pending_recipients?.length) {
       console.log(`  No pending recipients — skipping`);
       continue;
+    }
+
+    // Daily sender limit check
+    const dailyLimit = sender.daily_limit ?? null;
+    if (dailyLimit !== null && dailyLimit > 0) {
+      const senderId = sender.id;
+      const todayCount = await getSenderTodayCount(senderId);
+      const remaining = dailyLimit - todayCount;
+      console.log(`  Daily Limit: ${dailyLimit} | Sent Today: ${todayCount} | Remaining: ${remaining}`);
+
+      if (remaining <= 0) {
+        console.log(`  ⛔ Daily limit reached for ${senderEmail} — skipping campaign`);
+        continue;
+      }
+
+      if (campaign.pending_recipients.length > remaining) {
+        campaign.pending_recipients = campaign.pending_recipients.slice(0, remaining);
+        console.log(`  Trimmed to ${remaining} recipient(s) to stay within daily limit`);
+      }
     }
 
     const recipientIds = campaign.pending_recipients.map((r: any) => r.id);
