@@ -13,13 +13,13 @@
 
 ## 1. How the Scheduler Works
 
-The scheduler runs **every 1 minute** using a cron job.
+The scheduler runs **every 1 hour** using a cron job.
 
 ```
-cron.schedule("* * * * *", runScheduler)
+cron.schedule("0 * * * *", runScheduler)
 ```
 
-### Every minute it does:
+### Every hour it does:
 
 ```
 Scheduler runs
@@ -43,6 +43,7 @@ For each campaign:
 - If a previous run is still in progress → **skip** (no duplicate runs)
 - Campaigns per run: **max 5**
 - Recipients are marked as `in_queue` before sending to prevent duplicates
+- Contacts with **no time_from / time_to** → **skip** (do not send)
 
 ---
 
@@ -123,7 +124,8 @@ Current UTC time = 20:00
 ```
 time_from = null
 time_to   = null
-→ No window defined → send anytime ✅
+→ No window defined → ❌ SKIP (do not send)
+→ n8n timezone workflow must set time_from/time_to first
 ```
 
 ### Code Logic (scheduler.ts):
