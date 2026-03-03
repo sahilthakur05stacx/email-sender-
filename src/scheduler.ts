@@ -97,8 +97,8 @@ async function generateTracking(params: {
 
 /** Check if current server time is within the contact's allowed sending window (time_from – time_to) */
 function isWithinSendingWindow(timeFrom?: string | null, timeTo?: string | null): boolean {
-  // If no window defined, allow sending anytime
-  if (!timeFrom || !timeTo) return true;
+  // If no window defined, do NOT send
+  if (!timeFrom || !timeTo) return false;
 
   // Parse "HH:MM" strings
   const [fromH, fromM] = timeFrom.split(":").map(Number);
@@ -180,7 +180,7 @@ async function runScheduler() {
 
   // Use resolve=true so we get resolved_subject and resolved_body per recipient
   const response = await fetch(
-    `${SUPABASE_URL}/functions/v1/get-campaign-queue?action=queue&limit=2&resolve=true`,
+    `${SUPABASE_URL}/functions/v1/get-campaign-queue?action=queue&limit=5&resolve=true`,
     {
       headers: {
         "x-api-key": API_KEY,
@@ -373,6 +373,6 @@ async function runScheduler() {
   }
 }
 
-// Run every minute (same as before)
-cron.schedule("* * * * *", runScheduler);
+// Run every 1 hour
+cron.schedule("0 * * * *", runScheduler);
 console.log("Scheduler started (using resolved templates from API)...");
