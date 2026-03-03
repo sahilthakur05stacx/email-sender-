@@ -105,7 +105,7 @@ function isWithinSendingWindow(timeFrom?: string | null, timeTo?: string | null)
   const [toH, toM] = timeTo.split(":").map(Number);
 
   const now = new Date();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const currentMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
   const fromMinutes = fromH * 60 + fromM;
   const toMinutes = toH * 60 + toM;
 
