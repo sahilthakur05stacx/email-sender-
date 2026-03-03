@@ -120,7 +120,7 @@ async function getSenderTodayCount(senderId: string): Promise<number> {
 
     // Step 2: Count email_logs sent today for those campaigns
     const logsRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/email_logs?select=id&campaign_id=in.(${campaignIds})&sent_at=gte.${todayISO}`,
+      `${SUPABASE_URL}/rest/v1/email_logs?select=id&campaign_id=in.(${campaignIds})&created_at=gte.${todayISO}`,
       {
         headers: {
           Authorization: `Bearer ${SUPABASE_KEY}`,
