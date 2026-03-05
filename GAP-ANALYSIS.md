@@ -26,6 +26,14 @@
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
+│  Step 0b: Stale Queue Cleanup                                   │
+│  db/client.ts → resetStaleRecipients()                          │
+│  Resets "in_queue" recipients stuck > 30 min back to "pending"  │
+│  Prevents permanently stuck contacts after a crash              │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
 │  Step 1: Fetch Active Campaigns                                 │
 │  scheduler/fetchCampaigns.ts → fetchCampaigns()                 │
 │  GET /functions/v1/get-campaign-queue?resolve=true&limit=5      │
@@ -144,7 +152,7 @@ pending ──→ in_queue ──→ sent ──→ completed
 
 ## 1. SCHEDULER CODE — Implemented vs Missing
 
-### Implemented (17 items)
+### Implemented (18 items)
 
 | SRS Requirement | ID | File | Notes |
 |---|---|---|---|
@@ -167,14 +175,13 @@ pending ──→ in_queue ──→ sent ──→ completed
 | **Distributed lock stubs** | NFR 5.2 | `utils/lock.ts` | API ready for Redis/pg swap |
 | **Stale queue cleanup** | NFR 5.2 | `db/client.ts` | `resetStaleRecipients()` — resets `in_queue` > 30 min back to `pending` at start of each run |
 
-### Still Missing (4 items)
+### Still Missing (3 items — all low priority, handled by edge function)
 
 | SRS Requirement | ID | What's Missing | Impact |
 |---|---|---|---|
 | **Campaign date window** | FR-02 | No `end_date` column on campaigns, no date check in scheduler | Low — campaigns are manually paused/completed |
 | **Exclude unsubscribed/bounced/dnc** | FR-12, FR-13 | Filtering delegated to edge function, not verified locally | Low — edge function handles it |
 | **Exclude already-emailed-today** | FR-14 | Not checked in scheduler (edge function may handle) | Low — edge function handles it |
-| ~~**Stale queue cleanup (idempotency)**~~ | ~~NFR 5.2~~ | ~~Moved to Implemented~~ | ~~Done~~ |
 
 ### Deferred to Later Phase (11 items)
 
@@ -338,13 +345,13 @@ ALTER TABLE campaigns ADD COLUMN end_date TIMESTAMPTZ;
 
 | Category | Done | Total | % |
 |---|---|---|---|
-| MUST requirements (scheduler logic) | ~13 | ~22 | ~59% |
+| MUST requirements (scheduler logic) | ~14 | ~22 | ~64% |
 | SHOULD requirements | ~0 | ~5 | 0% |
 | MAY requirements | ~1 | ~1 | ~100% |
-| Non-functional requirements | ~5 | ~8 | ~62% |
+| Non-functional requirements | ~6 | ~8 | ~75% |
 | DB tables (exist) | 4/6 | 6 | 67% |
 | DB columns (on existing tables) | ~17 | ~22 | ~77% |
-| **Overall** | **~40** | **~64** | **~62%** |
+| **Overall** | **~42** | **~64** | **~66%** |
 
 > Note: Many "missing" items are LATER/SHOULD priority. All critical MUST items for current volume are done.
 
@@ -360,7 +367,6 @@ ALTER TABLE campaigns ADD COLUMN end_date TIMESTAMPTZ;
 4. ~~Add `step_entered_at` column~~ (migration + backfill)
 5. ~~Implement sequence priority sorting~~ (step DESC, entered ASC, contact_id ASC)
 6. ~~Replace console logger with Pino~~ (structured JSON, `pino-pretty` for dev)
-
 7. ~~Stale queue cleanup~~ — `resetStaleRecipients()` resets stuck `in_queue` > 30 min back to `pending`
 
 ### Deferred — Later Phase (when volume grows)
