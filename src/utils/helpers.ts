@@ -88,8 +88,8 @@ export async function generateTracking(params: {
 
 /** Check if current server time is within the contact's allowed sending window (time_from - time_to) */
 export function isWithinSendingWindow(timeFrom?: string | null, timeTo?: string | null): boolean {
-  // If no window defined, do NOT send
-  if (!timeFrom || !timeTo) return false;
+  // If no window defined, allow sending anytime
+  if (!timeFrom || !timeTo) return true;
 
   // Parse "HH:MM" strings
   const [fromH, fromM] = timeFrom.split(":").map(Number);

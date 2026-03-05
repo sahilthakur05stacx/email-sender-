@@ -1,5 +1,5 @@
 import { env, writeSchedulerLog, getSenderTodayCount, resetStaleRecipients, getContactsEmailedToday } from "../db/client";
-import { fetchCampaigns, markRecipientsInQueue } from "./fetchCampaigns";
+import { fetchCampaigns, markRecipientsInQueue, resetRecipientsToPending } from "./fetchCampaigns";
 import { isWithinSendingWindow, getTemplateForStep, generateTracking } from "../utils/helpers";
 import { logger } from "../utils/logger";
 import { acquireLock, releaseLock } from "../utils/lock";
@@ -28,16 +28,25 @@ export async function runScheduler() {
   let totalSkipped = 0;
   const campaignMeta: any[] = [];
 
-  logger.info("Cron job triggered!");
+  const maxEmailsPerRun = parseInt(process.env.MAX_EMAILS_PER_RUN || "0") || 0;
+
+  logger.info("========================================");
+  logger.info("  Scheduler Run Started");
+  logger.info(`  Time: ${runStartedAt.toISOString()}`);
+  if (maxEmailsPerRun > 0) logger.info(`  Max Emails: ${maxEmailsPerRun} (test mode)`);
+  logger.info("========================================");
 
   try {
     // Track contacts already sent to in this run (prevents cross-campaign same-day duplicates)
     const sentThisRun = new Set<string>();
 
     // Step 0: Reset any recipients stuck as "in_queue" from a previous crashed run
-    await resetStaleRecipients();
+    logger.info("[Step 0] Cleaning up stale in_queue recipients...");
+    const resetCount = await resetStaleRecipients();
+    logger.info(`[Step 0] Done — ${resetCount} recipient(s) reset`);
 
     // Step 1: Fetch active campaigns
+    logger.info("[Step 1] Fetching active campaigns...");
     const { success, queue, error } = await fetchCampaigns();
 
     if (!success) {
@@ -56,8 +65,11 @@ export async function runScheduler() {
     }
 
     // Step 2–6: Process each campaign
-    for (const campaign of queue) {
-      logger.info(`\n=== Campaign: ${campaign.name} ===`);
+    logger.info(`[Step 1] Found ${queue.length} campaign(s) to process`);
+
+    for (let i = 0; i < queue.length; i++) {
+      const campaign = queue[i];
+      logger.info(`\n[Step 2] ======= Campaign ${i + 1}/${queue.length}: ${campaign.name} =======`);
       const sender = campaign.sender || {};
       const senderName = sender.name ?? "";
       const senderEmail = sender.email ?? "";
@@ -89,9 +101,10 @@ export async function runScheduler() {
         return (a.contact_id || "").localeCompare(b.contact_id || "");
       });
 
-      logger.info(`  Sorted ${campaign.pending_recipients.length} recipients by sequence priority`);
+      logger.info(`[Step 2a] Sorted ${campaign.pending_recipients.length} recipients by sequence priority`);
 
       // Daily sender limit check
+      logger.info("[Step 2b] Checking sender daily limit...");
       const dailyLimit = sender.daily_limit ?? null;
       if (dailyLimit !== null && dailyLimit > 0) {
         const senderId = sender.id;
@@ -113,31 +126,47 @@ export async function runScheduler() {
         }
       }
 
+      // Max emails per run limit (for testing)
+      if (maxEmailsPerRun > 0) {
+        const runRemaining = maxEmailsPerRun - totalEmailsSent;
+        if (runRemaining <= 0) {
+          logger.info(`  Max emails per run (${maxEmailsPerRun}) reached — skipping remaining campaigns`);
+          break;
+        }
+        if (campaign.pending_recipients.length > runRemaining) {
+          campaign.pending_recipients = campaign.pending_recipients.slice(0, runRemaining);
+          logger.info(`  Trimmed to ${runRemaining} recipient(s) — max emails per run limit`);
+        }
+      }
+
       // Exclude contacts already emailed today (FR-14 — cross-campaign dedup)
+      // NOTE: Edge function already marked all fetched recipients as "in_queue".
+      // We must reset skipped ones back to "pending" after filtering.
+      logger.info("[Step 2c] Checking for contacts already emailed today...");
       const contactIds = campaign.pending_recipients.map((r: any) => r.contact_id || r.contact?.id);
       const emailedTodaySet = await getContactsEmailedToday(contactIds);
-      const beforeCount = campaign.pending_recipients.length;
+      const skippedByDedup: string[] = [];
       campaign.pending_recipients = campaign.pending_recipients.filter((r: any) => {
         const cid = r.contact_id || r.contact?.id;
         if (sentThisRun.has(cid) || emailedTodaySet.has(cid)) {
           logger.info(`  Skipping ${r.contact?.full_name || cid} — already emailed today`);
+          skippedByDedup.push(r.id);
           campaignSkipped++;
           totalSkipped++;
           return false;
         }
         return true;
       });
-      const excludedCount = beforeCount - campaign.pending_recipients.length;
-      if (excludedCount > 0) {
-        logger.info(`  Excluded ${excludedCount} contact(s) already emailed today`);
+      if (skippedByDedup.length > 0) {
+        logger.info(`  Excluded ${skippedByDedup.length} contact(s) already emailed today`);
+        await resetRecipientsToPending(skippedByDedup);
+        logger.info(`  Reset ${skippedByDedup.length} skipped recipient(s) back to pending`);
       }
 
-      // Mark recipients as in_queue
-      const recipientIds = campaign.pending_recipients.map((r: any) => r.id);
-      await markRecipientsInQueue(recipientIds);
-
       const emailsToSend: any[] = [];
+      const skippedByWindow: string[] = [];
 
+      logger.info(`[Step 3] Processing ${campaign.pending_recipients.length} recipient(s)...`);
       for (const recipient of campaign.pending_recipients) {
         const contact = recipient.contact || {};
         const currentStep = recipient.current_step;
@@ -145,6 +174,7 @@ export async function runScheduler() {
         // Sending window check
         if (!isWithinSendingWindow(contact.time_from, contact.time_to)) {
           logger.info(`\n  Skipping ${contact.full_name} — outside sending window (${contact.time_from} – ${contact.time_to})`);
+          skippedByWindow.push(recipient.id);
           campaignSkipped++;
           totalSkipped++;
           continue;
@@ -230,6 +260,13 @@ export async function runScheduler() {
         }
       }
 
+      // Reset recipients skipped by sending window back to pending
+      if (skippedByWindow.length > 0) {
+        await resetRecipientsToPending(skippedByWindow);
+        logger.info(`  Reset ${skippedByWindow.length} window-skipped recipient(s) back to pending`);
+      }
+
+      logger.info(`[Step 4] Sending ${emailsToSend.length} email(s) to n8n...`);
       const { N8N_WEBHOOK_URL } = env();
       if (emailsToSend.length > 0 && N8N_WEBHOOK_URL) {
         await fetch(N8N_WEBHOOK_URL, {
@@ -255,7 +292,8 @@ export async function runScheduler() {
       });
     }
 
-    // Write success log
+    // Step 5: Write success log
+    logger.info("[Step 5] Writing scheduler log to database...");
     await writeSchedulerLog({
       run_at: runStartedAt.toISOString(),
       campaigns_processed: campaignsProcessed,
@@ -267,7 +305,14 @@ export async function runScheduler() {
       meta: { campaigns: campaignMeta },
     });
 
-    logger.info(`\n--- Run complete: ${campaignsProcessed} campaigns, ${totalEmailsSent} sent, ${totalSkipped} skipped, ${Date.now() - runStartedAt.getTime()}ms ---`);
+    logger.info("[Step 6] Releasing lock...");
+    logger.info("========================================");
+    logger.info("  Run Complete!");
+    logger.info(`  Campaigns : ${campaignsProcessed}`);
+    logger.info(`  Sent      : ${totalEmailsSent}`);
+    logger.info(`  Skipped   : ${totalSkipped}`);
+    logger.info(`  Duration  : ${Date.now() - runStartedAt.getTime()}ms`);
+    logger.info("========================================");
 
   } catch (error: any) {
     logger.error({ err: error }, "Scheduler error");

@@ -91,7 +91,7 @@ export async function getContactsEmailedToday(contactIds: string[]): Promise<Set
   try {
     const ids = contactIds.join(",");
     const res = await supabaseFetch(
-      `/rest/v1/email_logs?select=contact_id&contact_id=in.(${ids})&created_at=gte.${todayISO}`,
+      `/rest/v1/email_logs?select=contact_id&contact_id=in.(${ids})&created_at=gte.${todayISO}&status=neq.queued`,
     );
     if (!res.ok) {
       logger.warn({ status: res.status }, "Failed to check contacts emailed today");
@@ -124,7 +124,7 @@ export async function getSenderTodayCount(senderId: string): Promise<number> {
 
     // Step 2: Count email_logs sent today for those campaigns
     const logsRes = await supabaseFetch(
-      `/rest/v1/email_logs?select=id&campaign_id=in.(${campaignIds})&created_at=gte.${todayISO}`,
+      `/rest/v1/email_logs?select=id&campaign_id=in.(${campaignIds})&created_at=gte.${todayISO}&status=neq.queued`,
       { headers: { Prefer: "count=exact" } },
     );
 

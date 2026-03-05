@@ -506,3 +506,45 @@ ALTER TABLE campaigns ADD COLUMN end_date TIMESTAMPTZ;
 - **Warmup ramp** — warmup override for sender limits
 - **Per-contact opt-out preferences** — day/time preferences
 - **Per-step reply-to/from-name** — template-level overrides
+
+---
+
+## 8. TEST RESULTS — March 5, 2026
+
+### Test 1: Basic Email Sending — PASSED
+
+**Setup:** Campaign "test" with 2 contacts (Kumar Saini, Simeon Prokopov), 4 step sequence, tracking OFF, `MAX_EMAILS_PER_RUN=2`.
+
+**Result:**
+```
+Campaigns : 1
+Sent      : 2
+Skipped   : 0
+Duration  : 4816ms
+```
+
+Both emails successfully sent to n8n webhook. Edge function correctly:
+- Fetched 2 pending recipients
+- Marked them as `in_queue`
+- Created `email_logs` with status "queued"
+- Resolved templates (Step 1: "Initial Outreach / Greeting")
+- Returned `pending_count: 2` with full contact + template data
+
+Scheduler correctly:
+- Passed sending window check (contacts have `time_from: 09:00`, `time_to: 18:00`)
+- Passed daily limit check (sender `sahil@stacx24.com`, limit: 50)
+- Passed dedup check (no emails sent today)
+- Built email payloads and POSTed to n8n
+
+### Tests Still Needed
+
+| Test | What to Verify | How to Test |
+|---|---|---|
+| **Reply stops sequence** | If contact replies after Step 1, Step 2 should NOT be sent | 1. Send Step 1 (done). 2. Call `update-recipient-status` with `status: "replied"`. 3. Wait for `wait_days` to pass. 4. Run scheduler — recipient should NOT appear |
+| **Wait days spacing** | Step 2 should only send after `wait_days` from Step 1 | 1. After Step 1 is sent, check `next_send_at` is set correctly. 2. Run scheduler before `next_send_at` — should skip. 3. Run scheduler after `next_send_at` — should send Step 2 |
+| **Daily limit enforcement** | Sender should stop after hitting daily limit | 1. Set sender `daily_limit: 1`. 2. Run scheduler with 2 recipients — only 1 should send |
+| **Cross-campaign dedup** | Same contact in 2 campaigns should only get 1 email per day | 1. Add same contact to 2 active campaigns. 2. Run scheduler — first campaign sends, second campaign skips that contact |
+| **Sending window skip** | Contacts outside time window should be skipped and reset to pending | 1. Set contact `time_from: 01:00`, `time_to: 02:00` (outside current time). 2. Run scheduler — should skip and reset to pending |
+| **Bounce stops sequence** | Bounced contact should not receive further emails | 1. Set recipient status to "bounced". 2. Run scheduler — should not appear |
+| **Stale queue cleanup** | Recipients stuck as `in_queue` > 30 min should be reset | 1. Manually set recipient to `in_queue` with old `updated_at`. 2. Run scheduler — Step 0 should reset them |
+| **Max emails per run** | `MAX_EMAILS_PER_RUN` should cap total emails | 1. Set `MAX_EMAILS_PER_RUN=1` with 2 pending. 2. Run scheduler — only 1 should send |
