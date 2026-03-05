@@ -25,13 +25,13 @@
 
 | SRS Requirement | ID | Priority | What's Missing |
 |---|---|---|---|
-| **Hardcoded credentials** | NFR/Security | CRITICAL | `SUPABASE_URL`, `SUPABASE_KEY`, `API_KEY`, `N8N_WEBHOOK_URL` are all **hardcoded in scheduler.ts** — violates security requirement. `.env` file exists but is not used |
-| **Hourly sender limit** | FR-06, FR-08 | MUST | No `hourly_limit` or `emails_sent_this_hour` tracking at all |
-| **Remaining capacity formula** | FR-08 | MUST | Should be `MIN(daily_remaining, hourly_remaining)` — only daily exists |
-| **Aggregate capacity across senders** | FR-10 | MUST | Current code has 1 sender per campaign (`campaigns.sender_id` FK) — no multi-sender support |
-| **Sequence priority sorting** | FR-18, FR-19 | MUST | No sorting by `current_step DESC` then `step_entered_at ASC` — contacts processed in whatever order the API returns |
-| **Round-robin sender assignment** | FR-23 | MUST | No round-robin — single sender per campaign |
-| **email_queue table** | Section 4.5 | MUST | Doesn't write to `email_queue` at all — sends directly to n8n webhook |
+| **Hardcoded credentials** | NFR/Security | DONE | ~~Hardcoded in scheduler.ts~~ — Fixed: now loads from `.env` via dotenv with startup validation |
+| **Hourly sender limit** | FR-06, FR-08 | LATER | No `hourly_limit` or `emails_sent_this_hour` — not needed at current volume (~5 emails/hr). Daily limit is sufficient |
+| **Remaining capacity formula** | FR-08 | LATER | `MIN(daily_remaining, hourly_remaining)` — deferred with hourly limit. Currently uses `daily_limit` only |
+| **Aggregate capacity across senders** | FR-10 | LATER | Current code has 1 sender per campaign (`campaigns.sender_id` FK) — multi-sender support deferred |
+| **Sequence priority sorting** | FR-18, FR-19 | DONE | Sorts by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC` — higher-step contacts always prioritized |
+| **Round-robin sender assignment** | FR-23 | LATER | No round-robin — single sender per campaign. Deferred until multi-sender is implemented |
+| **email_queue table** | Section 4.5 | LATER | Doesn't write to `email_queue` — sends directly to n8n webhook. Deferred — `email_logs` + `campaign_recipients` already track emails at current volume |
 | **scheduler_logs table** | Section 4.6 | MUST | No logging to DB — only `console.log` to stdout |
 | **Campaign date window** | FR-02 | MUST | No `start_date`/`end_date` validation — `campaigns.end_date` column doesn't even exist |
 | **Exclude unsubscribed/bounced/dnc** | FR-12, FR-13 | MUST | Filtering delegated entirely to the edge function — not verified locally in scheduler |
@@ -65,18 +65,18 @@ Your table: `campaigns` — exists in outreach-vibe
 
 **Extra columns you have (not in SRS):** `organization_id`, `sender_id`, `sequence_id`, `segment_id`, `description`, `behaviors`, `sender` (jsonb), `stats`, `tracking_enabled`, `track_opens`, `track_clicks`, `started_at`, `completed_at`, `updated_at`
 
-### 2.2 CAMPAIGN_SENDERS (SRS: `campaign_senders`)
+### 2.2 CAMPAIGN_SENDERS (SRS: `campaign_senders`) — LATER
 
-Your table: **DOES NOT EXIST**
+Your table: **DOES NOT EXIST** — deferred to later phase
 
 | SRS Column | SRS Type | Status |
 |---|---|---|
-| `id` | uuid PK | **MISSING** |
-| `campaign_id` | uuid FK | **MISSING** — currently `campaigns.sender_id` (single FK, 1 sender per campaign) |
-| `sender_id` | uuid FK | **MISSING** |
-| `is_active` | boolean | **MISSING** |
+| `id` | uuid PK | LATER |
+| `campaign_id` | uuid FK | LATER — currently `campaigns.sender_id` (single FK, 1 sender per campaign) |
+| `sender_id` | uuid FK | LATER |
+| `is_active` | boolean | LATER |
 
-> This is a **critical gap** — blocks multi-sender support (FR-10, FR-23)
+> Multi-sender support (FR-10, FR-23) will be implemented in a future phase. Current system uses single sender per campaign via `campaigns.sender_id`.
 
 ### 2.3 EMAIL_SENDERS (SRS: `email_senders`)
 
@@ -88,11 +88,11 @@ Your table: `senders` — exists in outreach-vibe
 | `email` | text | `email` | text | Done |
 | `display_name` | text | `name` | text | Done (name differs) |
 | `daily_limit` | integer | `daily_limit` | integer (default 50) | Done |
-| `hourly_limit` | integer | — | — | **MISSING** |
+| `hourly_limit` | integer | — | — | LATER — not needed at current volume (~5 emails/hr) |
 | `emails_sent_today` | integer | — | — | **MISSING** (currently counted from email_logs) |
-| `emails_sent_this_hour` | integer | — | — | **MISSING** |
+| `emails_sent_this_hour` | integer | — | — | LATER — deferred with hourly limit |
 | `last_reset_date` | date | — | — | **MISSING** |
-| `last_reset_hour` | integer | — | — | **MISSING** |
+| `last_reset_hour` | integer | — | — | LATER — deferred with hourly limit |
 | `is_active` | boolean | `is_active` | boolean | Done |
 | `warmup_ramp` | boolean | `warmup_status` | text (default 'not_started') | Partial — text vs boolean |
 
@@ -110,7 +110,7 @@ Your table: `campaign_recipients` — exists in outreach-vibe
 | `campaign_id` | uuid FK | `campaign_id` | uuid FK | Done |
 | `contact_id` | uuid FK | `contact_id` | uuid FK | Done |
 | `sequence_step` | integer | `current_step` | integer (default 1) | Done (name differs) |
-| `step_entered_at` | timestamptz | — | — | **MISSING** (needed for priority sort FR-18) |
+| `step_entered_at` | timestamptz | `step_entered_at` | timestamptz | Done (added, backfilled from enrolled_at) |
 | `status` | text (active/unsubscribed/bounced/complained/dnc/completed) | `status` | text (pending/active/paused/completed/replied/bounced/unsubscribed/skipped) | Partial — missing `complained` and `dnc` |
 | `last_emailed_at` | timestamptz | `last_sent_at` | timestamptz | Done (name differs) |
 
@@ -213,15 +213,15 @@ src/                              src/
 ### New Tables to Create
 
 ```sql
--- 1. campaign_senders (multi-sender support)
-CREATE TABLE campaign_senders (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-  sender_id UUID NOT NULL REFERENCES senders(id) ON DELETE CASCADE,
-  is_active BOOLEAN DEFAULT true,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  UNIQUE(campaign_id, sender_id)
-);
+-- 1. campaign_senders (multi-sender support) — LATER PHASE
+-- CREATE TABLE campaign_senders (
+--   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+--   campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+--   sender_id UUID NOT NULL REFERENCES senders(id) ON DELETE CASCADE,
+--   is_active BOOLEAN DEFAULT true,
+--   created_at TIMESTAMPTZ DEFAULT now(),
+--   UNIQUE(campaign_id, sender_id)
+-- );
 
 -- 2. email_queue (dispatch list)
 CREATE TABLE email_queue (
@@ -257,12 +257,14 @@ CREATE TABLE scheduler_logs (
 ### Columns to Add to Existing Tables
 
 ```sql
--- senders: add hourly tracking columns
-ALTER TABLE senders ADD COLUMN hourly_limit INTEGER DEFAULT 20;
+-- senders: add daily tracking columns
 ALTER TABLE senders ADD COLUMN emails_sent_today INTEGER DEFAULT 0;
-ALTER TABLE senders ADD COLUMN emails_sent_this_hour INTEGER DEFAULT 0;
 ALTER TABLE senders ADD COLUMN last_reset_date DATE DEFAULT CURRENT_DATE;
-ALTER TABLE senders ADD COLUMN last_reset_hour INTEGER DEFAULT 0;
+
+-- LATER (hourly limit — not needed at current volume ~5 emails/hr):
+-- ALTER TABLE senders ADD COLUMN hourly_limit INTEGER DEFAULT 20;
+-- ALTER TABLE senders ADD COLUMN emails_sent_this_hour INTEGER DEFAULT 0;
+-- ALTER TABLE senders ADD COLUMN last_reset_hour INTEGER DEFAULT 0;
 
 -- campaign_recipients: add step_entered_at for priority sorting
 ALTER TABLE campaign_recipients ADD COLUMN step_entered_at TIMESTAMPTZ DEFAULT now();
@@ -278,7 +280,7 @@ CREATE INDEX idx_campaigns_status ON campaigns(status);
 CREATE INDEX idx_campaign_recipients_campaign_status ON campaign_recipients(campaign_id, status);
 CREATE INDEX idx_senders_is_active ON senders(is_active);
 CREATE INDEX idx_email_queue_status ON email_queue(status);
-CREATE INDEX idx_campaign_senders_campaign ON campaign_senders(campaign_id);
+-- LATER: CREATE INDEX idx_campaign_senders_campaign ON campaign_senders(campaign_id);
 ```
 
 ---
@@ -299,13 +301,21 @@ CREATE INDEX idx_campaign_senders_campaign ON campaign_senders(campaign_id);
 
 ## 8. TOP PRIORITIES — Fix Order
 
-1. **CRITICAL: Move hardcoded secrets to `.env`** — security risk, credentials exposed in source code
-2. **Create 3 missing tables** — `campaign_senders`, `email_queue`, `scheduler_logs`
-3. **Add missing columns** — `hourly_limit`, `emails_sent_today`, `emails_sent_this_hour`, `step_entered_at`, `end_date`
+1. ~~**CRITICAL: Move hardcoded secrets to `.env`**~~ — DONE
+2. **Create `scheduler_logs` table** — log every run to DB for auditing
+3. **Add missing columns** — `emails_sent_today`, `last_reset_date`, `step_entered_at`, `end_date`
 4. **Implement sequence priority sorting** — sort by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC`
-5. **Add multi-sender support with round-robin** — requires `campaign_senders` table first
-6. **Write to `email_queue`** instead of sending directly to n8n
-7. **Add `scheduler_logs`** — log every run to DB
-8. **Replace `console.log` with Pino** — structured JSON logging, no PII
-9. **Add distributed lock** — replace in-memory `isRunning` with DB advisory lock
-10. **Add Slack alerting** — notify on critical errors
+5. **Add `scheduler_logs`** — log every run to DB
+7. **Replace `console.log` with Pino** — structured JSON logging, no PII
+8. **Add distributed lock** — replace in-memory `isRunning` with DB advisory lock
+9. **Add Slack alerting** — notify on critical errors
+
+### Deferred to Later Phase
+- **email_queue table** (Section 4.5) — dispatch queue between scheduler and n8n. Deferred — `email_logs` + `campaign_recipients` already track emails at current volume
+- **Hourly sender limit** (FR-06, FR-08) — `hourly_limit`, `emails_sent_this_hour`, `last_reset_hour` on senders. Not needed at current volume (~5 emails/hr), daily limit is sufficient
+- **Remaining capacity formula** (FR-08) — `MIN(daily_remaining, hourly_remaining)` — deferred with hourly limit
+- **Multi-sender support** (FR-10) — `campaign_senders` table, aggregate capacity across senders
+- **Round-robin sender assignment** (FR-23) — weighted round-robin distribution across multiple senders
+- **Warmup ramp support** (FR-11) — warmup override logic for sender limits
+- **Per-contact opt-out preferences** (FR-16) — respect per-contact day/time preferences
+- **Per-step reply-to/from-name** (FR-26) — template-level overrides

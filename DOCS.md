@@ -8,6 +8,10 @@
 5. [n8n Timezone Workflow](#5-n8n-timezone-workflow)
 6. [How Campaign Recipients Are Added](#6-how-campaign-recipients-are-added)
 7. [Full Flow — End to End](#7-full-flow--end-to-end)
+8. [Environment Variables](#8-environment-variables)
+9. [Scheduler Logs](#9-scheduler-logs)
+10. [How Emails Are Sent to n8n](#10-how-emails-are-sent-to-n8n)
+11. [Sequence Priority Sorting](#11-sequence-priority-sorting)
 
 ---
 
@@ -27,7 +31,9 @@ Scheduler runs
 Fetch pending campaigns from Supabase (max 5 campaigns per run)
       ↓
 For each campaign:
-    Check sender daily limit
+    Sort recipients by sequence priority
+      ↓
+    Check sender daily limit → trim from bottom
       ↓
     For each recipient:
         Check sending window (time_from / time_to)
@@ -37,6 +43,8 @@ For each campaign:
         Send to n8n webhook
               ↓
           n8n delivers the actual email
+      ↓
+Write run summary to scheduler_logs table
 ```
 
 ### Important Rules:
@@ -117,7 +125,7 @@ Current UTC time = 20:00
 ### What Happens When Skipped:
 - Recipient is **NOT marked as failed**
 - Stays in `pending` status
-- Next cron run (1 minute later) checks again
+- Next cron run (1 hour later) checks again
 - Will be sent automatically when the time window opens
 
 ### What If No Time Set:
@@ -303,22 +311,334 @@ pending → in_queue → sent → completed
     Segment assigned → DB trigger adds all contacts as recipients
     status: pending
               ↓
-[Scheduler — every 1 minute]
+[Scheduler — every 1 hour]
     1. Fetch pending campaigns (max 5)
     2. For each campaign:
-         a. Check sender daily limit
+         a. Sort recipients by sequence priority
+              → step 5 before step 3 before step 1
+              → same step? oldest entry first (FIFO)
+         b. Check sender daily limit
               → limit reached? skip campaign
-              → remaining = 3? only take 3 recipients
-         b. For each recipient:
+              → remaining = 3? trim to top 3 (highest priority kept)
+         c. For each recipient:
               → Check current UTC time vs time_from / time_to
               → Outside window? skip (stays pending)
               → Inside window? prepare email
-         c. Send eligible emails to n8n webhook
+         d. Send eligible emails to n8n webhook
     3. n8n delivers the actual email
     4. email_logs.created_at recorded (used for daily limit count)
+    5. Write run summary to scheduler_logs table
               ↓
 [Recipient Status Updates]
     pending → in_queue → sent → completed
+```
+
+---
+
+## 8. Environment Variables
+
+All credentials are loaded from `.env` file — **nothing is hardcoded** in source code.
+
+### Required Variables:
+
+| Variable | Description | Example |
+|---|---|---|
+| `SUPABASE_URL` | Supabase project URL | `https://xyz.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | Service role key (read-write) | `eyJhbGci...` |
+| `API_KEY` | API key for tracking service | `or_ed5e1...` |
+| `N8N_WEBHOOK_URL` | n8n webhook URL for email delivery | `https://n8n.example.com/webhook/...` |
+| `TRACKING_API_URL` | Tracking API base URL | `https://tracking.example.com` |
+
+### Optional Variables:
+
+| Variable | Description | Default |
+|---|---|---|
+| `CRON_EXPRESSION` | Cron schedule | `0 * * * *` (every hour) |
+| `LOG_LEVEL` | Log verbosity | `info` |
+| `TZ` | Process timezone | `UTC` |
+
+### Startup Validation:
+
+The scheduler validates all required env vars on startup. If any are missing, it exits with an error:
+
+```
+Missing required environment variables: SUPABASE_URL, API_KEY
+```
+
+### Setup:
+
+```bash
+cp .env.example .env
+# Edit .env with your actual values
+npm start
+```
+
+---
+
+## 9. Scheduler Logs
+
+Every scheduler run writes **1 row** to the `scheduler_logs` table in Supabase. This provides full auditing of what the scheduler did each hour.
+
+### Table Schema:
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | uuid PK | Auto-generated unique ID |
+| `run_at` | timestamptz | When this run started |
+| `campaigns_processed` | integer | How many active campaigns were found |
+| `total_slots_available` | integer | Total sender capacity (daily_limit - sent_today) |
+| `total_emails_sent` | integer | How many emails were sent to n8n this run |
+| `total_skipped` | integer | How many recipients were skipped (outside window, no template, etc.) |
+| `duration_ms` | integer | How long the run took in milliseconds |
+| `status` | text | `success` / `failed` / `skipped` |
+| `error` | text | Error message if status = failed or skipped |
+| `meta` | jsonb | Per-campaign breakdown |
+| `created_at` | timestamptz | Row creation timestamp |
+
+### Status Values:
+
+| Status | When |
+|---|---|
+| `success` | Run completed, at least 1 campaign processed |
+| `skipped` | No active campaigns found OR previous run still in progress |
+| `failed` | API error, DB error, or any unhandled exception |
+
+### Example Log Entries:
+
+```
+Normal run:
+  run_at: 2026-03-05 14:00:00
+  campaigns_processed: 3
+  total_slots_available: 45
+  total_emails_sent: 12
+  total_skipped: 5
+  duration_ms: 1200
+  status: success
+
+No campaigns:
+  run_at: 2026-03-05 15:00:00
+  campaigns_processed: 0
+  total_emails_sent: 0
+  duration_ms: 120
+  status: skipped
+
+Error:
+  run_at: 2026-03-05 16:00:00
+  campaigns_processed: 1
+  total_emails_sent: 3
+  duration_ms: 5000
+  status: failed
+  error: "fetch failed: ECONNREFUSED"
+```
+
+### Meta JSONB — Per-Campaign Breakdown:
+
+The `meta` column stores detailed info per campaign:
+
+```json
+{
+  "campaigns": [
+    {
+      "id": "uuid-abc",
+      "name": "Cold Outreach Q1",
+      "organization_id": "org-123",
+      "eligible": 20,
+      "sent": 15,
+      "skipped": 5
+    },
+    {
+      "id": "uuid-def",
+      "name": "Follow Up Sequence",
+      "organization_id": "org-123",
+      "eligible": 0,
+      "sent": 0,
+      "skipped": 0,
+      "reason": "daily_limit_reached"
+    }
+  ]
+}
+```
+
+### When Logs Are Written:
+
+```
+Scheduler triggers
+    ↓
+Previous run in progress? → Write log (status: skipped) → exit
+    ↓
+API returns error? → Write log (status: failed) → exit
+    ↓
+Process all campaigns...
+    ↓
+Write log (status: success) with full breakdown
+    ↓
+Exception at any point? → Write log (status: failed) with error message
+```
+
+### Querying Logs:
+
+```sql
+-- Last 10 runs
+SELECT run_at, status, campaigns_processed, total_emails_sent, duration_ms
+FROM scheduler_logs ORDER BY run_at DESC LIMIT 10;
+
+-- Failed runs today
+SELECT * FROM scheduler_logs
+WHERE status = 'failed' AND run_at >= CURRENT_DATE;
+
+-- Average emails per run this week
+SELECT AVG(total_emails_sent), AVG(duration_ms)
+FROM scheduler_logs
+WHERE status = 'success' AND run_at >= CURRENT_DATE - INTERVAL '7 days';
+```
+
+---
+
+## 10. How Emails Are Sent to n8n
+
+The scheduler does **NOT** send emails directly via SMTP. It builds an array of email objects and sends them to n8n in a single POST request.
+
+### Step 1 — Build Email Array
+
+For each eligible recipient, the scheduler creates an email object:
+
+```json
+{
+  "to": "john@company.com",
+  "toName": "John Smith",
+  "from": "sahil@stacx24.com",
+  "fromName": "Sahil",
+  "subject": "Quick question about Company Inc",
+  "body": "Hey John...",
+  "bodyHtml": "<html>...with tracking pixels...</html>",
+  "format": "html",
+  "recipientId": "uuid-123",
+  "campaignId": "uuid-456",
+  "contactId": "uuid-789",
+  "emailLogId": "uuid-log",
+  "trackingId": "uuid-track",
+  "organizationId": "uuid-org",
+  "trackingEnabled": true,
+  "trackOpens": true,
+  "trackClicks": true,
+  "trackingApplied": true,
+  "step": 2
+}
+```
+
+### Step 2 — POST to n8n Webhook
+
+All emails are sent in **one HTTP request**:
+
+```ts
+await fetch(N8N_WEBHOOK_URL, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(emailsToSend),  // array of all emails
+});
+```
+
+### Step 3 — n8n Delivers
+
+```
+Scheduler ── POST [email1, email2, email3] ──→ n8n webhook
+                                                    ↓
+                                              n8n loops through each
+                                                    ↓
+                                              sends via SMTP one by one
+                                                    ↓
+                                              email1 → SMTP → john@company.com
+                                              email2 → SMTP → sarah@other.com
+                                              email3 → SMTP → mike@xyz.com
+```
+
+### What Data n8n Receives:
+
+| Field | Purpose |
+|---|---|
+| `to`, `toName` | Recipient email and display name |
+| `from`, `fromName` | Sender email and display name |
+| `subject` | Email subject line |
+| `body` | Plain text body |
+| `bodyHtml` | HTML body (with tracking pixels if enabled) |
+| `format` | `text` or `html` |
+| `recipientId`, `campaignId`, `contactId` | IDs for status updates after send |
+| `emailLogId`, `trackingId` | IDs for open/click tracking |
+| `trackingEnabled`, `trackOpens`, `trackClicks` | Whether tracking is active |
+| `trackingApplied` | Whether tracking pixels were successfully injected |
+| `listUnsubscribeHeader` | List-Unsubscribe header for email compliance |
+| `step` | Current sequence step number |
+
+---
+
+## 11. Sequence Priority Sorting
+
+Recipients are sorted **before** processing so that contacts further in the funnel get priority. This ensures higher-step contacts are never skipped when capacity is limited.
+
+### Sort Order:
+
+| Priority | Column | Direction | Why |
+|---|---|---|---|
+| 1st | `current_step` | DESC (highest first) | Contact on step 5 has been in funnel longer than step 1 — prioritize them |
+| 2nd | `step_entered_at` | ASC (oldest first) | If two contacts are on the same step, the one who entered that step first goes first (FIFO fairness) |
+| 3rd | `contact_id` | ASC | Deterministic tie-breaker if everything else is equal |
+
+### Example:
+
+```
+Before sort (random API order):
+  Contact D - step 2 (entered Mar 1)
+  Contact A - step 5 (entered Mar 1)
+  Contact E - step 1 (entered Feb 15)
+  Contact C - step 3 (entered Mar 2)
+  Contact B - step 3 (entered Feb 20)
+
+After sort:
+  Contact A - step 5 (entered Mar 1)     ← highest step
+  Contact B - step 3 (entered Feb 20)    ← same step as C, but entered earlier
+  Contact C - step 3 (entered Mar 2)     ← same step as B, but entered later
+  Contact D - step 2 (entered Mar 1)
+  Contact E - step 1 (entered Feb 15)    ← lowest step
+```
+
+### How It Works with Daily Limit:
+
+```
+daily_limit = 3, 10 recipients available
+
+1. Sort all 10 by priority (step DESC → entered ASC)
+2. Trim to top 3 (daily limit)
+3. Contacts A, B, C get emails
+4. Contacts D through J wait for next run
+
+Step 5 contact is NEVER skipped for a step 1 contact.
+```
+
+### Required Column:
+
+The `step_entered_at` column on `campaign_recipients` tracks when a contact moved to their current step.
+
+- **New contacts**: set to `now()` when they join the campaign
+- **Existing contacts**: backfilled from `enrolled_at`
+- **Step change**: should be updated to `now()` when `current_step` changes
+
+### Code (scheduler.ts):
+
+```ts
+campaign.pending_recipients.sort((a, b) => {
+  // Primary: higher step first
+  const stepDiff = (b.current_step || 0) - (a.current_step || 0);
+  if (stepDiff !== 0) return stepDiff;
+
+  // Secondary: oldest entry at same step first (FIFO)
+  const aEntered = a.step_entered_at ? new Date(a.step_entered_at).getTime() : 0;
+  const bEntered = b.step_entered_at ? new Date(b.step_entered_at).getTime() : 0;
+  const enteredDiff = aEntered - bEntered;
+  if (enteredDiff !== 0) return enteredDiff;
+
+  // Tertiary: deterministic tie-breaker
+  return (a.contact_id || "").localeCompare(b.contact_id || "");
+});
 ```
 
 ---
@@ -327,10 +647,13 @@ pending → in_queue → sent → completed
 
 | File | Purpose |
 |---|---|
-| `src/scheduler.ts` | Main scheduler — cron job, daily limit, sending window |
+| `src/scheduler.ts` | Main scheduler — cron job, daily limit, sending window, logging |
+| `.env` | Environment variables (secrets — never committed) |
+| `.env.example` | Template for required env vars |
 | `supabase/functions/get-campaign-queue/index.ts` | Fetches pending recipients with contact data |
 | `supabase/functions/update-recipient-status/index.ts` | Updates recipient status after send |
 | `contacts` table | Stores `time_from`, `time_to`, `email` per contact |
 | `senders` table | Stores `daily_limit` per sender |
 | `email_logs` table | Tracks every email sent (used for daily limit count) |
-| `campaign_recipients` table | Tracks each contact's progress in a campaign |
+| `campaign_recipients` table | Tracks each contact's progress in a campaign (`current_step`, `step_entered_at`) |
+| `scheduler_logs` table | Audit log — one row per scheduler run |

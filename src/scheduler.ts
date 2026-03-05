@@ -93,6 +93,34 @@ async function generateTracking(params: {
   }
 }
 
+/** Write a row to scheduler_logs table */
+async function writeSchedulerLog(log: {
+  run_at: string;
+  campaigns_processed: number;
+  total_slots_available: number;
+  total_emails_sent: number;
+  total_skipped: number;
+  duration_ms: number;
+  status: "success" | "failed" | "skipped";
+  error?: string;
+  meta?: any;
+}) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/scheduler_logs`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        apikey: SUPABASE_KEY,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify(log),
+    });
+  } catch (err) {
+    console.error("Failed to write scheduler log:", err);
+  }
+}
+
 /** Check if current server time is within the contact's allowed sending window (time_from – time_to) */
 function isWithinSendingWindow(timeFrom?: string | null, timeTo?: string | null): boolean {
   // If no window defined, do NOT send
@@ -162,11 +190,28 @@ let isRunning = false;
 async function runScheduler() {
   if (isRunning) {
     console.log(`[${new Date().toISOString()}] Cron skipped — previous run still in progress`);
+    await writeSchedulerLog({
+      run_at: new Date().toISOString(),
+      campaigns_processed: 0,
+      total_slots_available: 0,
+      total_emails_sent: 0,
+      total_skipped: 0,
+      duration_ms: 0,
+      status: "skipped",
+      error: "Previous run still in progress",
+    });
     return;
   }
 
   isRunning = true;
-  console.log(`[${new Date().toISOString()}] Cron job triggered!`);
+  const runStartedAt = new Date();
+  let campaignsProcessed = 0;
+  let totalSlotsAvailable = 0;
+  let totalEmailsSent = 0;
+  let totalSkipped = 0;
+  const campaignMeta: any[] = [];
+
+  console.log(`[${runStartedAt.toISOString()}] Cron job triggered!`);
 
   try {
   // Use resolve=true so we get resolved_subject and resolved_body per recipient
@@ -186,6 +231,16 @@ async function runScheduler() {
 
   if (!data.success) {
     console.error("API error:", data.error || data);
+    await writeSchedulerLog({
+      run_at: runStartedAt.toISOString(),
+      campaigns_processed: 0,
+      total_slots_available: 0,
+      total_emails_sent: 0,
+      total_skipped: 0,
+      duration_ms: Date.now() - runStartedAt.getTime(),
+      status: "failed",
+      error: data.error || "API returned success=false",
+    });
     return;
   }
 
@@ -197,6 +252,8 @@ async function runScheduler() {
     const sender = campaign.sender || {};
     const senderName = sender.name ?? "";
     const senderEmail = sender.email ?? "";
+    let campaignSent = 0;
+    let campaignSkipped = 0;
     console.log(`Sender: ${senderName} <${senderEmail}>`);
     console.log(`Templates: ${campaign.templates?.length ?? 0}`);
     console.log(`Pending: ${campaign.pending_count ?? 0}`);
@@ -210,6 +267,24 @@ async function runScheduler() {
       continue;
     }
 
+    // Sequence priority sorting (FR-18, FR-19)
+    // Primary: current_step DESC (higher step = further in funnel = higher priority)
+    // Secondary: step_entered_at ASC (oldest first at same step = FIFO fairness)
+    // Tertiary: contact_id ASC (deterministic tie-breaker)
+    campaign.pending_recipients.sort((a: any, b: any) => {
+      const stepDiff = (b.current_step || 0) - (a.current_step || 0);
+      if (stepDiff !== 0) return stepDiff;
+
+      const aEntered = a.step_entered_at ? new Date(a.step_entered_at).getTime() : 0;
+      const bEntered = b.step_entered_at ? new Date(b.step_entered_at).getTime() : 0;
+      const enteredDiff = aEntered - bEntered;
+      if (enteredDiff !== 0) return enteredDiff;
+
+      return (a.contact_id || "").localeCompare(b.contact_id || "");
+    });
+
+    console.log(`  Sorted ${campaign.pending_recipients.length} recipients by sequence priority`);
+
     // Daily sender limit check
     const dailyLimit = sender.daily_limit ?? null;
     if (dailyLimit !== null && dailyLimit > 0) {
@@ -217,9 +292,12 @@ async function runScheduler() {
       const todayCount = await getSenderTodayCount(senderId);
       const remaining = dailyLimit - todayCount;
       console.log(`  Daily Limit: ${dailyLimit} | Sent Today: ${todayCount} | Remaining: ${remaining}`);
+      totalSlotsAvailable += remaining;
 
       if (remaining <= 0) {
         console.log(`  ⛔ Daily limit reached for ${senderEmail} — skipping campaign`);
+        campaignMeta.push({ id: campaign.id, name: campaign.name, organization_id: campaign.organization_id, eligible: 0, sent: 0, skipped: 0, reason: "daily_limit_reached" });
+        campaignsProcessed++;
         continue;
       }
 
@@ -252,6 +330,8 @@ async function runScheduler() {
       // Sending window check
       if (!isWithinSendingWindow(contact.time_from, contact.time_to)) {
         console.log(`\n  ⏰ Skipping ${contact.full_name} — outside sending window (${contact.time_from} – ${contact.time_to})`);
+        campaignSkipped++;
+        totalSkipped++;
         continue;
       }
 
@@ -352,13 +432,50 @@ async function runScheduler() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(emailsToSend),
       });
+      campaignSent = emailsToSend.length;
+      totalEmailsSent += campaignSent;
       console.log(`\n  Sent ${emailsToSend.length} email(s) to n8n`);
     } else if (emailsToSend.length > 0 && !N8N_WEBHOOK_URL) {
       console.warn("  N8N_WEBHOOK_URL not set — skipping webhook");
     }
+
+    campaignsProcessed++;
+    campaignMeta.push({
+      id: campaign.id,
+      name: campaign.name,
+      organization_id: campaign.organization_id,
+      eligible: campaign.pending_recipients?.length || 0,
+      sent: campaignSent,
+      skipped: campaignSkipped,
+    });
   }
-  } catch (error) {
+  // Write success log
+  await writeSchedulerLog({
+    run_at: runStartedAt.toISOString(),
+    campaigns_processed: campaignsProcessed,
+    total_slots_available: totalSlotsAvailable,
+    total_emails_sent: totalEmailsSent,
+    total_skipped: totalSkipped,
+    duration_ms: Date.now() - runStartedAt.getTime(),
+    status: campaignsProcessed === 0 ? "skipped" : "success",
+    meta: { campaigns: campaignMeta },
+  });
+
+  console.log(`\n--- Run complete: ${campaignsProcessed} campaigns, ${totalEmailsSent} sent, ${totalSkipped} skipped, ${Date.now() - runStartedAt.getTime()}ms ---`);
+
+  } catch (error: any) {
     console.error(`[${new Date().toISOString()}] Scheduler error:`, error);
+    await writeSchedulerLog({
+      run_at: runStartedAt.toISOString(),
+      campaigns_processed: campaignsProcessed,
+      total_slots_available: totalSlotsAvailable,
+      total_emails_sent: totalEmailsSent,
+      total_skipped: totalSkipped,
+      duration_ms: Date.now() - runStartedAt.getTime(),
+      status: "failed",
+      error: error?.message || String(error),
+      meta: { campaigns: campaignMeta },
+    });
   } finally {
     isRunning = false;
   }
