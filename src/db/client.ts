@@ -48,7 +48,7 @@ export async function writeSchedulerLog(log: {
       body: JSON.stringify(log),
     });
   } catch (err) {
-    logger.error("Failed to write scheduler log:", err);
+    logger.error({ err }, "Failed to write scheduler log");
   }
 }
 
@@ -82,7 +82,7 @@ export async function getSenderTodayCount(senderId: string): Promise<number> {
     }
     return 0;
   } catch (err) {
-    logger.error("  Failed to get sender daily count:", err);
+    logger.error({ err }, "Failed to get sender daily count");
     return 0;
   }
 }

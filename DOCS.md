@@ -656,7 +656,7 @@ src/
   db/
     client.ts           ← Supabase config, env(), supabaseFetch(), writeSchedulerLog(), getSenderTodayCount()
   utils/
-    logger.ts           ← Console logger wrapper (.info/.warn/.error with ISO timestamps)
+    logger.ts           ← Pino structured JSON logger (.info/.warn/.error)
     lock.ts             ← Distributed run lock (in-memory now, Redis-swappable later)
     alerts.ts           ← Slack/email alerting stubs (alertFailure, alertDailyDigest)
 .env                    ← Environment variables (secrets — never committed)
@@ -672,7 +672,7 @@ package.json            ← start script: ts-node src/scheduler/index.ts
 | `src/scheduler/runner.ts` | Main orchestrator — acquires lock, fetches campaigns, processes recipients, sends to n8n, writes logs |
 | `src/scheduler/fetchCampaigns.ts` | Fetches active campaigns from Supabase edge function, marks recipients as `in_queue` |
 | `src/db/client.ts` | Supabase connection — `env()` for lazy env vars, `supabaseFetch()` wrapper, `writeSchedulerLog()`, `getSenderTodayCount()` |
-| `src/utils/logger.ts` | Logger wrapper — `.info()`, `.warn()`, `.error()` with ISO timestamp prefix (swap to Pino later) |
+| `src/utils/logger.ts` | Pino structured JSON logger — `.info()`, `.warn()`, `.error()` with ISO timestamps. Use `npm run dev` for pretty output |
 | `src/utils/lock.ts` | Run lock — `acquireLock()`, `releaseLock()`, `isLocked()` (swap to Redis/pg advisory lock later) |
 | `src/utils/alerts.ts` | Alert stubs — `alertFailure()`, `alertDailyDigest()` (wire to Slack webhook later) |
 | `.env` | Environment variables (secrets — never committed) |

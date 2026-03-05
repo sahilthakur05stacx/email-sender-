@@ -81,7 +81,7 @@ export async function generateTracking(params: {
     const data = await res.json();
     return data;
   } catch (err) {
-    logger.error(`  Tracking API call failed:`, err);
+    logger.error({ err }, "Tracking API call failed");
     return null;
   }
 }

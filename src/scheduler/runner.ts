@@ -243,7 +243,7 @@ export async function runScheduler() {
     logger.info(`\n--- Run complete: ${campaignsProcessed} campaigns, ${totalEmailsSent} sent, ${totalSkipped} skipped, ${Date.now() - runStartedAt.getTime()}ms ---`);
 
   } catch (error: any) {
-    logger.error("Scheduler error:", error);
+    logger.error({ err: error }, "Scheduler error");
     await writeSchedulerLog({
       run_at: runStartedAt.toISOString(),
       campaigns_processed: campaignsProcessed,

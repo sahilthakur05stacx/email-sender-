@@ -5,45 +5,54 @@
 
 ---
 
-## 1. SCHEDULER CODE — What's Done vs Missing
+## 1. SCHEDULER CODE — Implemented vs Missing
 
-### Completed (Partially or Fully)
+### Implemented
 
-| SRS Requirement | Status | Notes |
+| SRS Requirement | ID | Notes |
 |---|---|---|
-| **Cron trigger every hour** | Done | `cron.schedule("0 * * * *", ...)` works |
-| **Fetch active campaigns** (FR-01) | Partial | Fetches via Supabase edge function (`get-campaign-queue`), but delegates filtering to the API — no local `status = "active"` check |
-| **Daily sender limit** (FR-06, FR-07) | Partial | `daily_limit` checked, but counted from `email_logs.created_at` — no `emails_sent_today` column on senders table |
-| **Sending window check** (FR-04) | Done | `isWithinSendingWindow()` works with per-contact `time_from`/`time_to` from contacts table |
-| **Template resolution** (FR-15) | Done | `getTemplateForStep()` handles resolved templates + fallback + randomize |
-| **Skip if previous run in progress** | Partial | `utils/lock.ts` with `acquireLock()`/`releaseLock()` — in-memory (swap to Redis/pg for multi-instance) |
-| **Tracking integration** | Done | `generateTracking()` calls tracking API with open/click/unsubscribe support |
-| **n8n webhook dispatch** | Done | Sends email payload to n8n for actual delivery |
-| **Recipient status update** | Done | Marks recipients as `in_queue` before sending to prevent duplicates |
+| **Cron trigger every hour** | — | `cron.schedule("0 * * * *", ...)` in `scheduler/index.ts` |
+| **Fetch active campaigns** | FR-01 | `scheduler/fetchCampaigns.ts` fetches via Supabase edge function (`get-campaign-queue`) |
+| **Daily sender limit** | FR-06, FR-07 | `daily_limit` checked via `getSenderTodayCount()` counting from `email_logs.created_at` |
+| **Sending window check** | FR-04 | `isWithinSendingWindow()` in `utils/helpers.ts` — per-contact `time_from`/`time_to` |
+| **Template resolution** | FR-15 | `getTemplateForStep()` in `utils/helpers.ts` — resolved templates + fallback + randomize |
+| **Sequence priority sorting** | FR-18, FR-19 | Sorts by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC` in `runner.ts` |
+| **Skip if previous run in progress** | — | `utils/lock.ts` with `acquireLock()`/`releaseLock()` (in-memory, Redis-swappable) |
+| **Tracking integration** | — | `generateTracking()` in `utils/helpers.ts` — calls tracking API with open/click/unsubscribe |
+| **n8n webhook dispatch** | — | Sends email payload array to n8n in `runner.ts` |
+| **Recipient status update** | — | Marks recipients as `in_queue` via `markRecipientsInQueue()` before sending |
+| **Secrets in .env** | NFR/Security | All credentials loaded from `.env` via dotenv with startup validation |
+| **Modular file structure** | NFR | Split into `scheduler/`, `db/`, `utils/` per SRS (see Section 5) |
+| **Structured logging (Pino)** | NFR 5.3 | `utils/logger.ts` uses Pino with structured JSON output, `pino-pretty` for dev |
+| **scheduler_logs table** | Section 4.6 | Migration exists + `writeSchedulerLog()` in `db/client.ts` writes every run |
+| **step_entered_at column** | FR-19 | Migration exists on `campaign_recipients`, backfilled from `enrolled_at` |
+| **Error alerting stubs** | NFR 5.3 | `utils/alerts.ts` with `alertFailure()` wired into runner error paths |
+| **Distributed lock stubs** | NFR 5.2 | `utils/lock.ts` with `acquireLock()`/`releaseLock()` API — ready for Redis/pg swap |
 
-### Missing (Not Implemented)
+### Still Missing
 
 | SRS Requirement | ID | Priority | What's Missing |
 |---|---|---|---|
-| **Hardcoded credentials** | NFR/Security | DONE | ~~Hardcoded in scheduler.ts~~ — Fixed: now loads from `.env` via dotenv with startup validation |
-| **Hourly sender limit** | FR-06, FR-08 | LATER | No `hourly_limit` or `emails_sent_this_hour` — not needed at current volume (~5 emails/hr). Daily limit is sufficient |
-| **Remaining capacity formula** | FR-08 | LATER | `MIN(daily_remaining, hourly_remaining)` — deferred with hourly limit. Currently uses `daily_limit` only |
-| **Aggregate capacity across senders** | FR-10 | LATER | Current code has 1 sender per campaign (`campaigns.sender_id` FK) — multi-sender support deferred |
-| **Sequence priority sorting** | FR-18, FR-19 | DONE | Sorts by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC` — higher-step contacts always prioritized |
-| **Round-robin sender assignment** | FR-23 | LATER | No round-robin — single sender per campaign. Deferred until multi-sender is implemented |
-| **email_queue table** | Section 4.5 | LATER | Doesn't write to `email_queue` — sends directly to n8n webhook. Deferred — `email_logs` + `campaign_recipients` already track emails at current volume |
-| **scheduler_logs table** | Section 4.6 | MUST | No logging to DB — only `console.log` to stdout |
-| **Campaign date window** | FR-02 | MUST | No `start_date`/`end_date` validation — `campaigns.end_date` column doesn't even exist |
+| **Campaign date window** | FR-02 | MUST | No `start_date`/`end_date` validation — `campaigns.end_date` column doesn't exist |
 | **Exclude unsubscribed/bounced/dnc** | FR-12, FR-13 | MUST | Filtering delegated entirely to the edge function — not verified locally in scheduler |
 | **Exclude already-emailed-today** | FR-14 | MUST | Not checked in scheduler code (edge function may handle it) |
-| **Structured logging (Pino)** | NFR 5.3 | Partial | `utils/logger.ts` wrapper in place — currently console, Pino swap is drop-in |
-| **Distributed lock** | NFR 5.2 | Partial | `utils/lock.ts` with `acquireLock()`/`releaseLock()` API — currently in-memory, Redis/pg swap is drop-in |
 | **DB transactions / idempotency** | NFR 5.2 | MUST | No transaction wrapping — crash mid-run can create duplicate queue entries |
-| **Error alerting (Slack)** | NFR 5.3 | Partial | `utils/alerts.ts` stubs wired into runner error paths — needs Slack webhook |
-| **Warmup ramp support** | FR-11 | SHOULD | No `warmup_ramp` logic — `senders.warmup_status` exists as text but is unused by scheduler |
-| **Per-contact opt-out preferences** | FR-16 | SHOULD | Not implemented |
-| **Per-step reply-to/from-name** | FR-26 | SHOULD | Not implemented |
-| **Timezone-aware send windows** | FR-05 | MAY | Handled externally by n8n workflow, not in scheduler |
+
+### Deferred to Later Phase
+
+| SRS Requirement | ID | Why Deferred |
+|---|---|---|
+| **Hourly sender limit** | FR-06, FR-08 | Not needed at current volume (~5 emails/hr). Daily limit is sufficient |
+| **Remaining capacity formula** | FR-08 | `MIN(daily_remaining, hourly_remaining)` — deferred with hourly limit |
+| **Aggregate capacity across senders** | FR-10 | Current code has 1 sender per campaign — multi-sender support deferred |
+| **Round-robin sender assignment** | FR-23 | No round-robin — single sender per campaign. Deferred until multi-sender |
+| **email_queue table** | Section 4.5 | Sends directly to n8n webhook. `email_logs` + `campaign_recipients` already track emails |
+| **Warmup ramp support** | FR-11 | No `warmup_ramp` logic — `senders.warmup_status` exists but unused by scheduler |
+| **Per-contact opt-out preferences** | FR-16 | Not implemented |
+| **Per-step reply-to/from-name** | FR-26 | Not implemented |
+| **Wire Slack alerting** | NFR 5.3 | `utils/alerts.ts` stubs ready — add Slack webhook POST when needed |
+| **Distributed lock (Redis/pg)** | NFR 5.2 | `utils/lock.ts` API ready — swap in-memory to Redis/pg for multi-instance |
+| **emails_sent_today column** | — | Not needed — scheduler counts from `email_logs` directly via `getSenderTodayCount()` |
 
 ---
 
@@ -58,7 +67,7 @@ Your table: `campaigns` — exists in outreach-vibe
 | `id` | uuid PK | `id` | uuid PK | Done |
 | `name` | text | `name` | text | Done |
 | `status` | text (active/paused/completed/draft) | `status` | text (draft/scheduled/active/paused/completed/archived) | Done (you have extra statuses — fine) |
-| `start_date` | timestamptz | `scheduled_at` | timestamptz | Partial — different name, similar purpose |
+| `start_date` | timestamptz | `scheduled_at` | timestamptz | Done (different name, similar purpose) |
 | `end_date` | timestamptz | — | — | **MISSING** |
 | `send_time_window` | jsonb | `settings` | jsonb (contains sendWindow, sendDays, timezone) | Done (embedded in settings jsonb) |
 | `created_at` | timestamptz | `created_at` | timestamptz | Done |
@@ -88,10 +97,10 @@ Your table: `senders` — exists in outreach-vibe
 | `email` | text | `email` | text | Done |
 | `display_name` | text | `name` | text | Done (name differs) |
 | `daily_limit` | integer | `daily_limit` | integer (default 50) | Done |
-| `hourly_limit` | integer | — | — | LATER — not needed at current volume (~5 emails/hr) |
-| `emails_sent_today` | integer | — | — | **MISSING** (currently counted from email_logs) |
+| `hourly_limit` | integer | — | — | LATER — not needed at current volume |
+| `emails_sent_today` | integer | — | — | LATER — counted from `email_logs` instead |
 | `emails_sent_this_hour` | integer | — | — | LATER — deferred with hourly limit |
-| `last_reset_date` | date | — | — | **MISSING** |
+| `last_reset_date` | date | — | — | LATER — not needed with `email_logs` count approach |
 | `last_reset_hour` | integer | — | — | LATER — deferred with hourly limit |
 | `is_active` | boolean | `is_active` | boolean | Done |
 | `warmup_ramp` | boolean | `warmup_status` | text (default 'not_started') | Partial — text vs boolean |
@@ -116,42 +125,29 @@ Your table: `campaign_recipients` — exists in outreach-vibe
 
 **Extra columns you have:** `organization_id`, `total_steps`, `paused_reason`, `next_send_at`, `sent_at`, `opened_at`, `clicked_at`, `replied_at`, `engagement` (jsonb), `error_message`, `enrolled_at`, `completed_at`, `updated_at`
 
-### 2.5 EMAIL_QUEUE (SRS: `email_queue`)
+### 2.5 EMAIL_QUEUE (SRS: `email_queue`) — LATER
 
-Your table: **DOES NOT EXIST**
+Your table: **DOES NOT EXIST** — deferred
 
-| SRS Column | SRS Type | Status |
-|---|---|---|
-| `id` | uuid PK | **MISSING** |
-| `campaign_id` | uuid FK | **MISSING** |
-| `sender_id` | uuid FK | **MISSING** |
-| `contact_id` | uuid FK | **MISSING** |
-| `template_id` | uuid FK | **MISSING** |
-| `sequence_step` | integer | **MISSING** |
-| `status` | text (pending/sent/failed/skipped) | **MISSING** |
-| `scheduled_at` | timestamptz | **MISSING** |
-| `sent_at` | timestamptz | **MISSING** |
-| `error_message` | text | **MISSING** |
-| `created_at` | timestamptz | **MISSING** |
+> Currently emails go directly from scheduler -> n8n webhook. No queue table in between. Deferred — `email_logs` + `campaign_recipients` already track emails at current volume.
 
-> Currently emails go directly from scheduler -> n8n webhook. No queue table in between.
+### 2.6 SCHEDULER_LOGS (SRS: `scheduler_logs`) — DONE
 
-### 2.6 SCHEDULER_LOGS (SRS: `scheduler_logs`)
-
-Your table: **DOES NOT EXIST**
+Your table: `scheduler_logs` — migration created
 
 | SRS Column | SRS Type | Status |
 |---|---|---|
-| `id` | uuid PK | **MISSING** |
-| `run_at` | timestamptz | **MISSING** |
-| `campaigns_processed` | integer | **MISSING** |
-| `total_slots_available` | integer | **MISSING** |
-| `total_emails_queued` | integer | **MISSING** |
-| `duration_ms` | integer | **MISSING** |
-| `error` | text | **MISSING** |
-| `meta` | jsonb | **MISSING** |
-
-> No run auditing at all — only console.log output.
+| `id` | uuid PK | Done |
+| `run_at` | timestamptz | Done |
+| `campaigns_processed` | integer | Done |
+| `total_slots_available` | integer | Done |
+| `total_emails_sent` | integer | Done (SRS calls it `total_emails_queued`) |
+| `total_skipped` | integer | Done (extra — not in SRS) |
+| `duration_ms` | integer | Done |
+| `status` | text | Done (extra — not in SRS) |
+| `error` | text | Done |
+| `meta` | jsonb | Done |
+| `created_at` | timestamptz | Done |
 
 ---
 
@@ -189,106 +185,54 @@ These are tables you already have that the SRS doesn't mention but are relevant:
 
 ---
 
-## 5. FILE STRUCTURE — Current vs Required
+## 5. FILE STRUCTURE — DONE
 
-> **STATUS: DONE** — Restructured from single `scheduler.ts` into modular files.
+> Restructured from single `scheduler.ts` into modular files.
 
 ```
-CURRENT (IMPLEMENTED):                SRS REQUIRED:
-src/                                  src/
-  scheduler/                            scheduler/
-    index.ts    ← Entry point, cron       index.ts        ✅
-    runner.ts   ← Main orchestrator       runner.ts       ✅
-    fetchCampaigns.ts                     fetchCampaigns.ts ✅
-  db/                                   db/
-    client.ts   ← Supabase connection     client.ts       ✅
-  utils/                                utils/
-    logger.ts   ← Console (Pino-ready)    logger.ts       ✅ (console wrapper, swap to Pino later)
-    lock.ts     ← In-memory lock          lock.ts         ✅ (in-memory, swap to Redis/pg later)
-    alerts.ts   ← Alert stubs            alerts.ts       ✅ (stubs, wire to Slack later)
+src/
+  scheduler/
+    index.ts            ← Entry point: dotenv, env validation, cron setup
+    runner.ts           ← Main runScheduler() orchestrator (steps 1–6)
+    fetchCampaigns.ts   ← Fetch active campaigns + mark recipients in_queue
+  db/
+    client.ts           ← Supabase config, env(), supabaseFetch(), writeSchedulerLog(), getSenderTodayCount()
+  utils/
+    logger.ts           ← Pino structured JSON logger
+    lock.ts             ← Distributed run lock (in-memory, Redis-swappable)
+    alerts.ts           ← Alert stubs (alertFailure, alertDailyDigest)
 ```
 
 ### Key Design Decisions:
 - **Lazy env vars**: `db/client.ts` exports `env()` function (not top-level constants) so `dotenv.config()` runs first
 - **Lock module**: `acquireLock()`/`releaseLock()` API ready for Redis swap — no changes needed in runner
-- **Logger interface**: `.info()/.warn()/.error()` matches Pino API — drop-in replacement later
+- **Logger**: Pino structured JSON — `npm start` for raw JSON, `npm run dev` for pretty colored output
 - **fetchCampaigns.ts**: Extracted campaign fetch + `markRecipientsInQueue()` from runner for single-responsibility
 
 ---
 
-## 6. MIGRATION NEEDED — Missing Tables & Columns
+## 6. MIGRATION NEEDED — Remaining
 
-### New Tables to Create
+### Tables Still Missing
 
 ```sql
--- 1. campaign_senders (multi-sender support) — LATER PHASE
--- CREATE TABLE campaign_senders (
---   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
---   campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
---   sender_id UUID NOT NULL REFERENCES senders(id) ON DELETE CASCADE,
---   is_active BOOLEAN DEFAULT true,
---   created_at TIMESTAMPTZ DEFAULT now(),
---   UNIQUE(campaign_id, sender_id)
--- );
-
--- 2. email_queue (dispatch list)
-CREATE TABLE email_queue (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id UUID NOT NULL,
-  campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-  sender_id UUID NOT NULL REFERENCES senders(id),
-  contact_id UUID NOT NULL REFERENCES contacts(id),
-  template_id UUID REFERENCES templates(id) ON DELETE SET NULL,
-  sequence_step INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'skipped')),
-  scheduled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  sent_at TIMESTAMPTZ,
-  error_message TEXT,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  UNIQUE(campaign_id, contact_id, sequence_step, scheduled_at::date)
-);
-
--- 3. scheduler_logs (run auditing)
-CREATE TABLE scheduler_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  campaigns_processed INTEGER DEFAULT 0,
-  total_slots_available INTEGER DEFAULT 0,
-  total_emails_queued INTEGER DEFAULT 0,
-  duration_ms INTEGER DEFAULT 0,
-  error TEXT,
-  meta JSONB,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
+-- email_queue (dispatch list) — LATER PHASE
+-- Not needed at current volume. Sends directly to n8n webhook.
 ```
 
-### Columns to Add to Existing Tables
+### Columns Still Missing
 
 ```sql
--- senders: add daily tracking columns
-ALTER TABLE senders ADD COLUMN emails_sent_today INTEGER DEFAULT 0;
-ALTER TABLE senders ADD COLUMN last_reset_date DATE DEFAULT CURRENT_DATE;
-
--- LATER (hourly limit — not needed at current volume ~5 emails/hr):
--- ALTER TABLE senders ADD COLUMN hourly_limit INTEGER DEFAULT 20;
--- ALTER TABLE senders ADD COLUMN emails_sent_this_hour INTEGER DEFAULT 0;
--- ALTER TABLE senders ADD COLUMN last_reset_hour INTEGER DEFAULT 0;
-
--- campaign_recipients: add step_entered_at for priority sorting
-ALTER TABLE campaign_recipients ADD COLUMN step_entered_at TIMESTAMPTZ DEFAULT now();
-
 -- campaigns: add end_date for campaign window check
 ALTER TABLE campaigns ADD COLUMN end_date TIMESTAMPTZ;
 ```
 
-### Indexes to Add
+### Migrations Already Applied
 
 ```sql
-CREATE INDEX idx_campaigns_status ON campaigns(status);
-CREATE INDEX idx_campaign_recipients_campaign_status ON campaign_recipients(campaign_id, status);
-CREATE INDEX idx_senders_is_active ON senders(is_active);
-CREATE INDEX idx_email_queue_status ON email_queue(status);
--- LATER: CREATE INDEX idx_campaign_senders_campaign ON campaign_senders(campaign_id);
+-- scheduler_logs table — DONE
+-- step_entered_at on campaign_recipients — DONE (backfilled from enrolled_at)
+-- time_from/time_to on contacts — DONE
 ```
 
 ---
@@ -297,33 +241,39 @@ CREATE INDEX idx_email_queue_status ON email_queue(status);
 
 | Category | Done | Total | % |
 |---|---|---|---|
-| MUST requirements (scheduler logic) | ~5 | ~22 | ~23% |
+| MUST requirements (scheduler logic) | ~13 | ~22 | ~59% |
 | SHOULD requirements | ~0 | ~5 | 0% |
 | MAY requirements | ~1 | ~1 | ~100% |
-| Non-functional requirements | ~1 | ~8 | ~12% |
-| DB tables (exist) | 3/6 | 6 | 50% |
-| DB columns (on existing tables) | ~15 | ~22 | ~68% |
-| **Overall** | **~25** | **~64** | **~39%** |
+| Non-functional requirements | ~5 | ~8 | ~62% |
+| DB tables (exist) | 4/6 | 6 | 67% |
+| DB columns (on existing tables) | ~17 | ~22 | ~77% |
+| **Overall** | **~40** | **~64** | **~62%** |
 
 ---
 
-## 8. TOP PRIORITIES — Fix Order
+## 8. TOP PRIORITIES — What's Left
 
-1. ~~**CRITICAL: Move hardcoded secrets to `.env`**~~ — DONE
-2. ~~**Restructure into modular files**~~ — DONE (`scheduler/`, `db/`, `utils/` with lazy env, lock, alerts)
-3. **Create `scheduler_logs` table** — log every run to DB for auditing
-4. **Add missing columns** — `emails_sent_today`, `last_reset_date`, `step_entered_at`, `end_date`
-5. **Implement sequence priority sorting** — sort by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC`
-6. **Replace console logger with Pino** — `utils/logger.ts` interface is ready, swap implementation
-7. **Replace in-memory lock with Redis/pg** — `utils/lock.ts` API is ready, swap implementation
-8. **Wire Slack alerting** — `utils/alerts.ts` stubs are wired into runner, add Slack webhook POST
+### Completed
 
-### Deferred to Later Phase
-- **email_queue table** (Section 4.5) — dispatch queue between scheduler and n8n. Deferred — `email_logs` + `campaign_recipients` already track emails at current volume
-- **Hourly sender limit** (FR-06, FR-08) — `hourly_limit`, `emails_sent_this_hour`, `last_reset_hour` on senders. Not needed at current volume (~5 emails/hr), daily limit is sufficient
-- **Remaining capacity formula** (FR-08) — `MIN(daily_remaining, hourly_remaining)` — deferred with hourly limit
-- **Multi-sender support** (FR-10) — `campaign_senders` table, aggregate capacity across senders
-- **Round-robin sender assignment** (FR-23) — weighted round-robin distribution across multiple senders
-- **Warmup ramp support** (FR-11) — warmup override logic for sender limits
-- **Per-contact opt-out preferences** (FR-16) — respect per-contact day/time preferences
-- **Per-step reply-to/from-name** (FR-26) — template-level overrides
+1. ~~Move hardcoded secrets to `.env`~~
+2. ~~Restructure into modular files~~ (`scheduler/`, `db/`, `utils/`)
+3. ~~Create `scheduler_logs` table~~ (migration + code)
+4. ~~Add `step_entered_at` column~~ (migration + backfill)
+5. ~~Implement sequence priority sorting~~ (step DESC, entered ASC, contact_id ASC)
+6. ~~Replace console logger with Pino~~ (structured JSON, `pino-pretty` for dev)
+
+### Next Up
+
+7. **Add `end_date` to campaigns** — migration + scheduler check for campaign window
+8. **DB transactions / idempotency** — wrap critical sections to prevent duplicate queue entries on crash
+
+### Deferred — Later Phase
+
+- **Distributed lock (Redis/pg)** — swap in-memory lock when deploying multi-instance
+- **Slack alerting** — add Slack webhook POST to `utils/alerts.ts` stubs
+- **email_queue table** — dispatch queue between scheduler and n8n
+- **Hourly sender limit** — `hourly_limit`, `emails_sent_this_hour` on senders
+- **Multi-sender support** — `campaign_senders` table + round-robin assignment
+- **Warmup ramp** — warmup override logic for sender limits
+- **Per-contact opt-out preferences** — respect per-contact day/time preferences
+- **Per-step reply-to/from-name** — template-level overrides

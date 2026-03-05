@@ -8,7 +8,7 @@ import { logger } from "./logger";
 export async function alertFailure(error: string, meta?: any): Promise<void> {
   // TODO: POST to Slack webhook
   // TODO: Send alert email
-  logger.error("ALERT — Scheduler failure:", error, meta);
+  logger.error({ error, meta }, "ALERT — Scheduler failure");
 }
 
 export async function alertDailyDigest(summary: {
@@ -17,5 +17,5 @@ export async function alertDailyDigest(summary: {
   total_skipped: number;
 }): Promise<void> {
   // TODO: POST daily digest to Slack
-  logger.info("Daily digest:", summary);
+  logger.info({ summary }, "Daily digest");
 }
