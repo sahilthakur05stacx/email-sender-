@@ -1,16 +1,14 @@
 import cron from "node-cron";
+import dotenv from "dotenv";
 
-const SUPABASE_URL = "https://ujzxlsqlopgazqktukpq.supabase.co";
-const API_KEY =
-  "or_ed5e1ee1676a5de84aed3de020915a0a64a223d7a7f672bed7bd255de2538aec";
-const SUPABASE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVqenhsc3Fsb3BnYXpxa3R1a3BxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2ODU1MTEwNywiZXhwIjoyMDg0MTI3MTA3fQ.GWZ5h3hBclPXCF5TPBNqRPsEEG2hArzkbsW9kgkNJzQ";
-// const N8N_WEBHOOK_URL =
-//   "http://localhost:5678/webhook/11ce44bf-f24d-4086-8a51-ed833a8cc281";
-const N8N_WEBHOOK_URL =
-  "https://n8n.f16infotech.com/webhook/11ce44bf-f24d-4086-8a51-ed833a8cc281";
-const TRACKING_API_URL = "https://tracking.f16infotech.com" 
-// http://localhost:3000";
+dotenv.config();
+
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+const API_KEY = process.env.API_KEY!;
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL!;
+const TRACKING_API_URL = process.env.TRACKING_API_URL!;
+const CRON_EXPRESSION = process.env.CRON_EXPRESSION || "0 * * * *";
 
 /** Get template for current step from resolved_templates (or fallback to templates) */
 function getTemplateForStep(
@@ -171,13 +169,6 @@ async function runScheduler() {
   console.log(`[${new Date().toISOString()}] Cron job triggered!`);
 
   try {
-  if (!API_KEY || !SUPABASE_KEY) {
-    console.error(
-      "Missing API_KEY or SUPABASE_SERVICE_KEY / SUPABASE_ANON_KEY",
-    );
-    return;
-  }
-
   // Use resolve=true so we get resolved_subject and resolved_body per recipient
   const response = await fetch(
     `${SUPABASE_URL}/functions/v1/get-campaign-queue?action=queue&limit=5&resolve=true`,
@@ -373,6 +364,14 @@ async function runScheduler() {
   }
 }
 
-// Run every 1 hour
-cron.schedule("0 * * * *", runScheduler);
-console.log("Scheduler started (using resolved templates from API)...");
+// Validate required env vars before starting
+const requiredEnvVars = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "API_KEY", "N8N_WEBHOOK_URL", "TRACKING_API_URL"];
+const missing = requiredEnvVars.filter((v) => !process.env[v]);
+if (missing.length > 0) {
+  console.error(`Missing required environment variables: ${missing.join(", ")}`);
+  process.exit(1);
+}
+
+// Run on configured schedule (default: every hour)
+cron.schedule(CRON_EXPRESSION, runScheduler);
+console.log(`Scheduler started on cron "${CRON_EXPRESSION}"`);
