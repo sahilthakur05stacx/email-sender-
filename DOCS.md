@@ -12,6 +12,9 @@
 9. [Scheduler Logs](#9-scheduler-logs)
 10. [How Emails Are Sent to n8n](#10-how-emails-are-sent-to-n8n)
 11. [Sequence Priority Sorting](#11-sequence-priority-sorting)
+12. [Full Flow Walkthrough — Real Data Example](#12-full-flow-walkthrough--real-data-example)
+    - [Wait Days — How Step 2 Is Sent After X Days](#wait-days--how-step-2-is-sent-after-x-days)
+    - [Reply Protection — How Replied Contacts Are Stopped](#reply-protection--how-replied-contacts-are-stopped)
 
 ---
 
@@ -707,3 +710,495 @@ scheduler/index.ts
         └── utils/alerts.ts
               └── utils/logger.ts
 ```
+
+---
+
+## 12. Full Flow Walkthrough — Real Data Example
+
+Let's say it's **March 5, 2026 at 10:00 AM UTC**. The cron fires.
+
+---
+
+### Step 0: Lock Check
+
+```
+Is another run still going? → NO → Continue
+```
+
+If the 9:00 AM run was still processing (maybe slow internet), we'd skip and try again at 11:00 AM.
+
+---
+
+### Step 0b: Clean Up Stuck Recipients
+
+```
+Are there any recipients stuck as "in_queue" for 30+ minutes?
+
+Found 1:
+  John Smith — marked "in_queue" at 8:15 AM (stuck for 1h 45m)
+  → Reset to "pending" (he'll get picked up this run)
+
+Sarah Jones — marked "in_queue" at 9:50 AM (only 10 min ago)
+  → Leave alone (probably still being processed by n8n)
+```
+
+---
+
+### Step 1: Fetch Active Campaigns
+
+Scheduler asks Supabase: *"Give me active campaigns with pending recipients"*
+
+```
+Response from Supabase:
+
+Campaign 1: "Cold Outreach UK"
+  Sender: sahil@stacx24.com (daily_limit: 50)
+  Templates: 3 (Step 1, Step 2, Step 3)
+  Tracking: ON
+  Pending recipients: 8 contacts
+
+Campaign 2: "Follow Up USA"
+  Sender: sahil@stacx24.com (daily_limit: 50)
+  Templates: 2 (Step 1, Step 2)
+  Tracking: ON
+  Pending recipients: 5 contacts
+```
+
+---
+
+### Step 2: Process Campaign 1 — "Cold Outreach UK"
+
+**2a. Sort recipients by priority:**
+
+```
+Before sort (random order from API):
+  Contact D - Matt    - Step 1 (entered Mar 3)
+  Contact A - Emma    - Step 3 (entered Mar 1)
+  Contact E - James   - Step 1 (entered Feb 28)
+  Contact C - Sophie  - Step 2 (entered Mar 2)
+  Contact B - Oliver  - Step 2 (entered Feb 25)
+  Contact F - Lucy    - Step 1 (entered Mar 4)
+  Contact G - Harry   - Step 1 (entered Mar 1)
+  Contact H - Grace   - Step 1 (entered Mar 2)
+
+After sort:
+  1. Emma    - Step 3 (entered Mar 1)    ← highest step, furthest in funnel
+  2. Oliver  - Step 2 (entered Feb 25)   ← step 2, entered earlier than Sophie
+  3. Sophie  - Step 2 (entered Mar 2)    ← step 2, entered later
+  4. James   - Step 1 (entered Feb 28)   ← step 1, oldest first
+  5. Harry   - Step 1 (entered Mar 1)
+  6. Grace   - Step 1 (entered Mar 2)
+  7. Matt    - Step 1 (entered Mar 3)
+  8. Lucy    - Step 1 (entered Mar 4)    ← lowest priority
+```
+
+**2b. Check sender daily limit:**
+
+```
+Sender: sahil@stacx24.com
+Daily limit: 50
+Emails sent today (from email_logs): 47
+Remaining: 50 - 47 = 3
+
+We have 8 recipients but only 3 slots left.
+Trim to top 3 (highest priority kept):
+
+  1. Emma    - Step 3  → gets email
+  2. Oliver  - Step 2  → gets email
+  3. Sophie  - Step 2  → gets email
+  4. James   - Step 1  → cut (no slots left, waits for tomorrow)
+  5. Harry   - Step 1  → cut
+  6. Grace   - Step 1  → cut
+  7. Matt    - Step 1  → cut
+  8. Lucy    - Step 1  → cut
+
+Emma on Step 3 is NEVER skipped for Lucy on Step 1.
+```
+
+**2c. Exclude contacts already emailed today (FR-14):**
+
+```
+Suppose Emma was also in "Follow Up USA" campaign
+and already got an email from that campaign earlier today.
+
+Batch query: email_logs WHERE contact_id IN (Emma, Oliver, Sophie) AND created_at >= today
+Result: Emma already emailed today
+
+  1. Emma    - Step 3  → SKIP (already emailed today)
+  2. Oliver  - Step 2  → eligible
+  3. Sophie  - Step 2  → eligible
+
+Also tracks in-memory: if Oliver was sent in Campaign 1,
+he won't get sent again in Campaign 2 during this same run.
+```
+
+**2d. Mark these 2 as "in_queue":**
+
+```
+Emma   → status: "pending" → "in_queue"
+Oliver → status: "pending" → "in_queue"
+Sophie → status: "pending" → "in_queue"
+
+Now if scheduler crashes, these won't get picked up again (no duplicates).
+If they're still "in_queue" after 30 min, Step 0b will reset them.
+```
+
+---
+
+### Step 3: Process Each Recipient
+
+**Recipient 1 — Emma (Step 3):**
+
+```
+3a. Sending window check:
+    Emma's company is in London
+    time_from: "09:00"  time_to: "17:00" (UTC)
+    Current time: 10:00 UTC
+    10:00 is between 09:00 and 17:00 → SEND
+
+3b. Get template for Step 3:
+    Found: "Final Follow Up"
+    Subject: "Last check-in about {{company_name}}"
+    Body HTML: "<html>Hey Emma, I wanted to reach out one last time..."
+
+3c. Apply tracking:
+    POST to tracking-api → injects open pixel + rewrites links
+    Returns: tracked HTML + unsubscribe header
+
+3d. Build email object:
+    {
+      to: "emma@londonagency.co.uk",
+      toName: "Emma Wilson",
+      from: "sahil@stacx24.com",
+      fromName: "Sahil",
+      subject: "Last check-in about London Agency",
+      bodyHtml: "<html>...with tracking pixel...</html>",
+      format: "html",
+      step: 3,
+      trackingApplied: true
+    }
+```
+
+**Recipient 2 — Oliver (Step 2):**
+
+```
+3a. Sending window check:
+    Oliver's company is in Manchester
+    time_from: "09:00"  time_to: "17:00"
+    10:00 UTC → SEND
+
+3b. Template for Step 2: "Quick Follow Up"
+3c. Tracking applied
+3d. Email object built
+```
+
+**Recipient 3 — Sophie (Step 2):**
+
+```
+3a. Sending window check:
+    Sophie's company is in New York
+    time_from: "14:00"  time_to: "22:00" (UTC = 9AM-5PM New York)
+    Current: 10:00 UTC = 5:00 AM in New York
+    10:00 is BEFORE 14:00 → SKIP
+
+    Sophie stays in queue. Next run at 11:00 AM UTC (6 AM New York)
+    will check again. She'll get her email at 2:00 PM UTC (9 AM New York).
+```
+
+---
+
+### Step 4: Send to n8n
+
+```
+2 emails ready (Emma + Oliver). Sophie was skipped.
+
+POST to n8n webhook:
+[
+  { to: "emma@londonagency.co.uk", subject: "Last check-in...", step: 3, ... },
+  { to: "oliver@manchester.com", subject: "Quick follow up...", step: 2, ... }
+]
+
+n8n receives the array → loops through → sends each via SMTP:
+  emma@londonagency.co.uk    → SENT
+  oliver@manchester.com      → SENT
+```
+
+---
+
+### Step 5: Write Scheduler Log
+
+```
+INSERT into scheduler_logs:
+  run_at: "2026-03-05 10:00:00"
+  campaigns_processed: 2
+  total_slots_available: 3
+  total_emails_sent: 2
+  total_skipped: 1 (Sophie — outside window)
+  duration_ms: 850
+  status: "success"
+  meta: {
+    campaigns: [
+      { name: "Cold Outreach UK", eligible: 3, sent: 2, skipped: 1 },
+      { name: "Follow Up USA", eligible: 0, sent: 0, skipped: 0,
+        reason: "daily_limit_reached" }
+    ]
+  }
+```
+
+Notice "Follow Up USA" sent 0 — because sahil@stacx24.com already hit 50 emails (47 before + 2 now + 1 skipped = 50). No slots left for the second campaign.
+
+---
+
+### Step 6: Release Lock
+
+```
+releaseLock() → lock OFF
+Next cron at 11:00 AM can run normally.
+```
+
+---
+
+### What Happens Next Hour (11:00 AM UTC)
+
+```
+Sophie — still "in_queue", time is now 11:00 UTC (6 AM New York)
+  → Still before 14:00 UTC → SKIP again
+
+James, Harry, Grace, Matt, Lucy — still "pending"
+  → But daily limit is 50 and sahil already sent 50 today
+  → "Daily limit reached" → SKIP entire campaign
+
+Tomorrow at midnight:
+  → email_logs count resets (new day)
+  → sahil has 50 fresh slots
+  → James, Harry, Grace, Matt, Lucy get their emails
+```
+
+---
+
+### Recipient Status — Full Lifecycle
+
+```
+Day 1:
+  Lucy joins campaign         → status: "pending", step: 1
+
+Day 1, 2:00 PM:
+  Scheduler picks Lucy        → status: "in_queue"
+  Sends to n8n                → status: "sent" (n8n updates this)
+
+Day 3:
+  Lucy moves to step 2        → status: "pending", step: 2
+  Scheduler picks her again   → gets step 2 template
+  Sent                        → status: "sent"
+
+Day 5:
+  Lucy moves to step 3        → status: "pending", step: 3
+  Scheduler sends final email → status: "sent"
+  Sequence complete           → status: "completed"
+
+OR at any point:
+  Lucy clicks unsubscribe     → status: "unsubscribed" (never emailed again)
+  Lucy's email bounces        → status: "bounced" (never emailed again)
+  Lucy replies                → status: "replied" (sequence stops)
+```
+
+---
+
+### Wait Days — How Step 2 Is Sent After X Days
+
+Each template step has a `wait_days` setting (configured in UI when creating a sequence).
+
+```
+Template Step 1: "First Email"       → wait_days: 0  (send immediately)
+Template Step 2: "Follow Up"         → wait_days: 3  (wait 3 days)
+Template Step 3: "Final Follow Up"   → wait_days: 5  (wait 5 days)
+```
+
+**Example — Lucy's full journey:**
+
+```
+Day 1 (March 1):
+  Lucy joins campaign
+  → status: "pending", current_step: 1, next_send_at: NULL
+
+Day 1, 2:00 PM — Scheduler runs:
+  next_send_at is NULL → eligible → picked up
+  Step 1 template sent to n8n → n8n delivers via SMTP
+  n8n calls update-recipient-status with status: "sent"
+
+  advanceStep() runs:
+    → Looks up Step 2 template → wait_days: 3
+    → Calculates: next_send_at = March 1 + 3 days = March 4
+    → Updates Lucy:
+        status: "pending"
+        current_step: 2
+        next_send_at: "2026-03-04 14:00:00"
+        last_sent_at: "2026-03-01 14:00:00"
+
+Day 2 (March 2) — Scheduler runs:
+  Lucy: next_send_at = March 4 → March 4 > March 2 → SKIP (not ready yet)
+
+Day 3 (March 3) — Scheduler runs:
+  Lucy: next_send_at = March 4 → March 4 > March 3 → SKIP (still waiting)
+
+Day 4 (March 4) — Scheduler runs:
+  Lucy: next_send_at = March 4 → March 4 <= March 4 → ELIGIBLE
+  Step 2 template "Follow Up" sent to n8n
+  n8n delivers → calls update-recipient-status
+
+  advanceStep() runs:
+    → Looks up Step 3 template → wait_days: 5
+    → Calculates: next_send_at = March 4 + 5 days = March 9
+    → Updates Lucy:
+        status: "pending"
+        current_step: 3
+        next_send_at: "2026-03-09 14:00:00"
+
+Day 9 (March 9) — Scheduler runs:
+  Lucy: next_send_at = March 9 → ELIGIBLE
+  Step 3 template "Final Follow Up" sent
+  advanceStep() → current_step (3) >= total_steps (3) → DONE
+    → status: "completed", completed_at: now
+```
+
+**The query that enforces this:**
+
+```
+get-campaign-queue edge function:
+
+.eq("status", "pending")
+.or("next_send_at.is.null,next_send_at.lte." + new Date().toISOString())
+
+Meaning:
+  - next_send_at IS NULL      → new recipient, send now (Step 1)
+  - next_send_at <= now()      → wait period passed, send next step
+  - next_send_at > now()       → still waiting, SKIP
+```
+
+---
+
+### Reply Protection — How Replied Contacts Are Stopped
+
+When a contact replies, the entire sequence stops. They never receive the next step.
+
+**Example — Oliver replies after Step 1:**
+
+```
+Day 1:
+  Oliver receives Step 1 email → status: "sent"
+  advanceStep → status: "pending", current_step: 2, next_send_at: March 4
+
+Day 2:
+  Oliver replies to the email
+  n8n detects reply → calls update-recipient-status with status: "replied"
+
+  Edge function does:
+    → Finds Oliver's campaign_recipients row
+    → Updates: status = "replied", replied_at = now
+    → Also updates ALL his other campaign recipients:
+        .in("status", ["active", "sent", "pending"])
+        → All set to "replied"
+
+Day 4 — Scheduler runs:
+  Query: .eq("status", "pending")
+  Oliver's status is "replied" (not "pending")
+  → Oliver is NOT returned in the query
+  → Step 2 is NEVER sent
+```
+
+**Same protection for other statuses:**
+
+```
+Contact replies      → status: "replied"     → never picked up again
+Contact unsubscribes → status: "unsubscribed" → never picked up again
+Email bounces        → status: "bounced"      → never picked up again
+Sequence finishes    → status: "completed"    → never picked up again
+
+Only "pending" recipients are ever fetched by the scheduler.
+```
+
+**Flow diagram — Reply stops the sequence:**
+
+```
+Step 1 sent → wait 3 days → Step 2 sent → wait 5 days → Step 3 sent → COMPLETED
+                  │
+                  │ (contact replies on Day 2)
+                  ▼
+         status: "replied"
+         Step 2 NEVER sent
+         Sequence STOPPED
+```
+
+**Where the protection happens:**
+
+```
+Layer 1 — update-recipient-status (Supabase edge function):
+  Sets status from "pending" → "replied"
+  Also updates ALL campaign_recipients for this contact
+
+Layer 2 — get-campaign-queue (Supabase edge function):
+  Only returns .eq("status", "pending")
+  "replied" contacts are never returned
+
+Layer 3 — Scheduler (runner.ts):
+  Only processes what it receives from the edge function
+  Never sees replied contacts
+```
+
+---
+
+### Flow Diagram — Complete Run
+
+```
+[CRON fires every hour]
+        │
+        ▼
+┌─────────────────┐     YES
+│ Lock acquired?  │───────────→ Skip run, write log (status: skipped)
+│ (already busy?) │
+└────────┬────────┘
+         │ NO (lock free)
+         ▼
+┌─────────────────────────┐
+│ Reset stale "in_queue"  │  (stuck > 30 min → back to "pending")
+│ recipients              │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ Fetch active campaigns  │  (Supabase edge function)
+│ with pending recipients │
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────────────────────────────┐
+│ For each campaign:                              │
+│                                                 │
+│  1. Sort recipients by priority                 │
+│     (step DESC → entered ASC → contact_id ASC)  │
+│                                                 │
+│  2. Check sender daily limit                    │
+│     → Trim list if over limit                   │
+│     → Skip campaign if 0 remaining              │
+│                                                 │
+│  3. Mark selected as "in_queue"                 │
+│                                                 │
+│  4. For each recipient:                         │
+│     ├── Check sending window                    │
+│     │   → SKIP if outside time_from/time_to     │
+│     ├── Get template for current step           │
+│     ├── Apply tracking (open pixel + links)     │
+│     └── Add to email batch                      │
+│                                                 │
+│  5. POST email batch to n8n webhook             │
+│     → n8n delivers via SMTP                     │
+└────────┬────────────────────────────────────────┘
+         ▼
+┌─────────────────────────┐
+│ Write scheduler_logs    │  (status, counts, duration, per-campaign meta)
+└────────┬────────────────┘
+         ▼
+┌─────────────────────────┐
+│ Release lock            │  → Next hour's run can proceed
+└─────────────────────────┘
+```
+
+Every hour, same process, same steps.

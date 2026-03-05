@@ -148,6 +148,132 @@ pending ──→ in_queue ──→ sent ──→ completed
                └──→ (stuck if crash — needs stale queue cleanup)
 ```
 
+### Wait Days — How Steps Are Spaced Out
+
+Each template step has a `wait_days` setting configured in the UI:
+
+```
+Template Step 1: "First Email"       → wait_days: 0  (send immediately)
+Template Step 2: "Follow Up"         → wait_days: 3  (wait 3 days after Step 1)
+Template Step 3: "Final Follow Up"   → wait_days: 5  (wait 5 days after Step 2)
+```
+
+**How it works — Lucy's journey through 3 steps:**
+
+```
+Day 1 (March 1):
+  Lucy joins campaign → status: "pending", step: 1, next_send_at: NULL
+
+Day 1, 2:00 PM — Scheduler runs:
+  next_send_at is NULL → eligible → picked up
+  Step 1 template sent via n8n
+
+  After n8n delivers, update-recipient-status is called (status: "sent")
+  advanceStep() runs:
+    → Looks up Step 2 template → wait_days: 3
+    → next_send_at = March 1 + 3 days = March 4
+    → Updates: status: "pending", current_step: 2, next_send_at: March 4
+
+Day 2 (March 2) — Scheduler runs:
+  Lucy: next_send_at = March 4 → March 4 > now → SKIP (still waiting)
+
+Day 3 (March 3) — Scheduler runs:
+  Lucy: next_send_at = March 4 → SKIP (still waiting)
+
+Day 4 (March 4) — Scheduler runs:
+  Lucy: next_send_at = March 4 → March 4 <= now → ELIGIBLE
+  Step 2 template "Follow Up" sent via n8n
+  advanceStep():
+    → Step 3 wait_days: 5
+    → next_send_at = March 4 + 5 days = March 9
+    → Updates: status: "pending", current_step: 3, next_send_at: March 9
+
+Day 9 (March 9) — Scheduler runs:
+  Lucy: next_send_at = March 9 → ELIGIBLE
+  Step 3 "Final Follow Up" sent
+  advanceStep() → current_step (3) >= total_steps (3)
+    → status: "completed", completed_at: now → DONE
+```
+
+**The query that enforces wait days (get-campaign-queue edge function):**
+
+```
+.eq("status", "pending")
+.or("next_send_at.is.null,next_send_at.lte." + now())
+
+  next_send_at IS NULL   → new recipient (Step 1), send now
+  next_send_at <= now()  → wait period passed, send next step
+  next_send_at > now()   → still waiting, SKIP
+```
+
+### Reply Protection — How Replied Contacts Are Stopped
+
+When a contact replies, the entire sequence stops immediately. They never receive the next step.
+
+**Example — Oliver replies after receiving Step 1:**
+
+```
+Day 1:
+  Oliver receives Step 1 email → status: "sent"
+  advanceStep() → status: "pending", step: 2, next_send_at: March 4
+
+Day 2:
+  Oliver replies to the email
+  n8n detects reply → calls update-recipient-status (status: "replied")
+
+  Edge function does:
+    → Finds Oliver's campaign_recipients row
+    → Sets: status = "replied", replied_at = now
+    → Also updates ALL his campaign recipients across campaigns:
+        WHERE contact_id = Oliver AND status IN ("active", "sent", "pending")
+        → ALL set to "replied"
+
+Day 4 — Scheduler runs:
+  Query: .eq("status", "pending")
+  Oliver's status is "replied" (not "pending")
+  → NOT returned by the query
+  → Step 2 is NEVER sent
+```
+
+**Same protection for all stop statuses:**
+
+```
+Contact replies      → status: "replied"      → never picked up again
+Contact unsubscribes → status: "unsubscribed"  → never picked up again
+Email bounces        → status: "bounced"       → never picked up again
+Sequence finishes    → status: "completed"     → never picked up again
+
+Only status = "pending" recipients are fetched by the scheduler.
+```
+
+**Flow diagram:**
+
+```
+Step 1 sent → wait 3 days → Step 2 sent → wait 5 days → Step 3 sent → COMPLETED
+                  │
+                  │ (contact replies on Day 2)
+                  ▼
+         status: "replied"
+         Step 2 NEVER sent
+         Sequence STOPPED
+```
+
+**Where the protection happens (3 layers):**
+
+```
+Layer 1 — update-recipient-status (Supabase edge function):
+  Sets status from "pending" → "replied"
+  Updates ALL campaign_recipients for this contact
+
+Layer 2 — get-campaign-queue (Supabase edge function):
+  Only returns .eq("status", "pending")
+  "replied" contacts are never returned to scheduler
+
+Layer 3 — Scheduler (runner.ts):
+  Only processes what it receives from the edge function
+  Never sees replied/bounced/unsubscribed contacts
+```
+
 ---
 
 ## 1. SCHEDULER CODE — Implemented vs Missing
@@ -174,14 +300,14 @@ pending ──→ in_queue ──→ sent ──→ completed
 | **Error alerting stubs** | NFR 5.3 | `utils/alerts.ts` | `alertFailure()` wired into runner error paths |
 | **Distributed lock stubs** | NFR 5.2 | `utils/lock.ts` | API ready for Redis/pg swap |
 | **Stale queue cleanup** | NFR 5.2 | `db/client.ts` | `resetStaleRecipients()` — resets `in_queue` > 30 min back to `pending` at start of each run |
+| **Exclude already-emailed-today** | FR-14 | `db/client.ts` + `scheduler/runner.ts` | `getContactsEmailedToday()` batch query + in-memory `sentThisRun` Set — prevents cross-campaign same-day duplicates |
 
-### Still Missing (3 items — all low priority, handled by edge function)
+### Still Missing (2 items — all low priority, handled by edge function)
 
 | SRS Requirement | ID | What's Missing | Impact |
 |---|---|---|---|
 | **Campaign date window** | FR-02 | No `end_date` column on campaigns, no date check in scheduler | Low — campaigns are manually paused/completed |
 | **Exclude unsubscribed/bounced/dnc** | FR-12, FR-13 | Filtering delegated to edge function, not verified locally | Low — edge function handles it |
-| **Exclude already-emailed-today** | FR-14 | Not checked in scheduler (edge function may handle) | Low — edge function handles it |
 
 ### Deferred to Later Phase (11 items)
 

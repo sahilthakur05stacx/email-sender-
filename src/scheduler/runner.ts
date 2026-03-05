@@ -1,4 +1,4 @@
-import { env, writeSchedulerLog, getSenderTodayCount, resetStaleRecipients } from "../db/client";
+import { env, writeSchedulerLog, getSenderTodayCount, resetStaleRecipients, getContactsEmailedToday } from "../db/client";
 import { fetchCampaigns, markRecipientsInQueue } from "./fetchCampaigns";
 import { isWithinSendingWindow, getTemplateForStep, generateTracking } from "../utils/helpers";
 import { logger } from "../utils/logger";
@@ -31,6 +31,9 @@ export async function runScheduler() {
   logger.info("Cron job triggered!");
 
   try {
+    // Track contacts already sent to in this run (prevents cross-campaign same-day duplicates)
+    const sentThisRun = new Set<string>();
+
     // Step 0: Reset any recipients stuck as "in_queue" from a previous crashed run
     await resetStaleRecipients();
 
@@ -110,6 +113,24 @@ export async function runScheduler() {
         }
       }
 
+      // Exclude contacts already emailed today (FR-14 — cross-campaign dedup)
+      const contactIds = campaign.pending_recipients.map((r: any) => r.contact_id || r.contact?.id);
+      const emailedTodaySet = await getContactsEmailedToday(contactIds);
+      const alreadyEmailedCount = emailedTodaySet.size + sentThisRun.size;
+      campaign.pending_recipients = campaign.pending_recipients.filter((r: any) => {
+        const cid = r.contact_id || r.contact?.id;
+        if (sentThisRun.has(cid) || emailedTodaySet.has(cid)) {
+          logger.info(`  Skipping ${r.contact?.full_name || cid} — already emailed today`);
+          campaignSkipped++;
+          totalSkipped++;
+          return false;
+        }
+        return true;
+      });
+      if (alreadyEmailedCount > 0) {
+        logger.info(`  Excluded ${alreadyEmailedCount} contact(s) already emailed today`);
+      }
+
       // Mark recipients as in_queue
       const recipientIds = campaign.pending_recipients.map((r: any) => r.id);
       await markRecipientsInQueue(recipientIds);
@@ -178,6 +199,7 @@ export async function runScheduler() {
             }
           }
 
+          const contactId = recipient.contact_id || contact.id;
           emailsToSend.push({
             to: contact.email,
             toName: contact.full_name,
@@ -190,7 +212,7 @@ export async function runScheduler() {
             format: templateForStep.format || "text",
             recipientId: recipient.id,
             campaignId: campaign.id,
-            contactId: recipient.contact_id || contact.id,
+            contactId,
             emailLogId: recipient.email_log_id || null,
             trackingId: recipient.tracking_id || null,
             organizationId: campaign.organization_id,
@@ -203,6 +225,7 @@ export async function runScheduler() {
             listUnsubscribePostHeader,
             step: currentStep,
           });
+          sentThisRun.add(contactId);
         }
       }
 

@@ -80,6 +80,31 @@ export async function resetStaleRecipients(): Promise<number> {
   }
 }
 
+/** Get contact IDs that already received an email today (prevents cross-campaign same-day duplicates) */
+export async function getContactsEmailedToday(contactIds: string[]): Promise<Set<string>> {
+  if (!contactIds.length) return new Set();
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayISO = today.toISOString();
+
+  try {
+    const ids = contactIds.join(",");
+    const res = await supabaseFetch(
+      `/rest/v1/email_logs?select=contact_id&contact_id=in.(${ids})&created_at=gte.${todayISO}`,
+    );
+    if (!res.ok) {
+      logger.warn({ status: res.status }, "Failed to check contacts emailed today");
+      return new Set();
+    }
+    const rows = await res.json();
+    return new Set(rows.map((r: any) => r.contact_id));
+  } catch (err) {
+    logger.error({ err }, "Failed to check contacts emailed today");
+    return new Set();
+  }
+}
+
 /** Get how many emails this sender has already sent today (across all their campaigns) */
 export async function getSenderTodayCount(senderId: string): Promise<number> {
   const today = new Date();
