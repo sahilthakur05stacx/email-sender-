@@ -583,13 +583,43 @@ Scheduler (before next_send_at) → SKIPPED (next_send_at > now)
 Scheduler (after next_send_at)  → Step 2 "Follow-Up" SENT
 ```
 
+### Test 4: Max Emails Per Run — PASSED
+
+**Setup:** 2 pending recipients, `MAX_EMAILS_PER_RUN=1` in .env.
+
+**Result:**
+```
+pending_count: 2
+Trimmed to 1 recipient(s) — max emails per run limit
+Sent: 1
+```
+
+- Edge function returned 2 recipients
+- Scheduler trimmed to 1 due to `MAX_EMAILS_PER_RUN=1`
+- Only Kumar Saini sent, Simeon left for next run
+
+### Test 5: Sending Window Skip — PASSED
+
+**Setup:** Kumar `time_from: 09:00, time_to: 18:00` (inside), Simeon `time_from: 01:00, time_to: 02:00` (outside). Current time: 12:43 UTC.
+
+**Result:**
+```
+Contact: Kumar Saini — sent
+Skipping Simeon Prokopov — outside sending window (01:00 – 02:00)
+Reset 1 window-skipped recipient(s) back to pending
+Sent: 1, Skipped: 1
+```
+
+- Kumar inside window → sent to n8n
+- Simeon outside window → skipped and reset back to `pending` (not stuck as `in_queue`)
+
+**Bug found & fixed:** Edge function `get-campaign-queue` was not returning `time_from`/`time_to` in contact data when `resolve=true`. Fixed by adding them to `requiredContactCols` in `fetchCampaignRecipients()`. Edge function redeployed.
+
 ### Tests Still Needed
 
 | Test | What to Verify | How to Test |
 |---|---|---|
 | **Daily limit enforcement** | Sender should stop after hitting daily limit | 1. Set sender `daily_limit: 1`. 2. Run scheduler with 2 recipients — only 1 should send |
 | **Cross-campaign dedup** | Same contact in 2 campaigns should only get 1 email per day | 1. Add same contact to 2 active campaigns. 2. Run scheduler — first campaign sends, second campaign skips that contact |
-| **Sending window skip** | Contacts outside time window should be skipped and reset to pending | 1. Set contact `time_from: 01:00`, `time_to: 02:00` (outside current time). 2. Run scheduler — should skip and reset to pending |
 | **Bounce stops sequence** | Bounced contact should not receive further emails | 1. Set recipient status to "bounced". 2. Run scheduler — should not appear |
 | **Stale queue cleanup** | Recipients stuck as `in_queue` > 30 min should be reset | 1. Manually set recipient to `in_queue` with old `updated_at`. 2. Run scheduler — Step 0 should reset them |
-| **Max emails per run** | `MAX_EMAILS_PER_RUN` should cap total emails | 1. Set `MAX_EMAILS_PER_RUN=1` with 2 pending. 2. Run scheduler — only 1 should send |
