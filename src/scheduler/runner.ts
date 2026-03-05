@@ -116,7 +116,7 @@ export async function runScheduler() {
       // Exclude contacts already emailed today (FR-14 — cross-campaign dedup)
       const contactIds = campaign.pending_recipients.map((r: any) => r.contact_id || r.contact?.id);
       const emailedTodaySet = await getContactsEmailedToday(contactIds);
-      const alreadyEmailedCount = emailedTodaySet.size + sentThisRun.size;
+      const beforeCount = campaign.pending_recipients.length;
       campaign.pending_recipients = campaign.pending_recipients.filter((r: any) => {
         const cid = r.contact_id || r.contact?.id;
         if (sentThisRun.has(cid) || emailedTodaySet.has(cid)) {
@@ -127,8 +127,9 @@ export async function runScheduler() {
         }
         return true;
       });
-      if (alreadyEmailedCount > 0) {
-        logger.info(`  Excluded ${alreadyEmailedCount} contact(s) already emailed today`);
+      const excludedCount = beforeCount - campaign.pending_recipients.length;
+      if (excludedCount > 0) {
+        logger.info(`  Excluded ${excludedCount} contact(s) already emailed today`);
       }
 
       // Mark recipients as in_queue

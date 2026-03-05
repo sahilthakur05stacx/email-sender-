@@ -85,7 +85,7 @@ export async function getContactsEmailedToday(contactIds: string[]): Promise<Set
   if (!contactIds.length) return new Set();
 
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  today.setUTCHours(0, 0, 0, 0);
   const todayISO = today.toISOString();
 
   try {
@@ -108,7 +108,7 @@ export async function getContactsEmailedToday(contactIds: string[]): Promise<Set
 /** Get how many emails this sender has already sent today (across all their campaigns) */
 export async function getSenderTodayCount(senderId: string): Promise<number> {
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  today.setUTCHours(0, 0, 0, 0);
   const todayISO = today.toISOString();
 
   try {

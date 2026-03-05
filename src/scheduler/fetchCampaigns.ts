@@ -16,11 +16,23 @@ export async function fetchCampaigns(): Promise<{ success: boolean; queue: any[]
     },
   );
 
-  const data = await response.json();
+  if (!response.ok) {
+    logger.error({ status: response.status }, "Campaign queue API returned non-OK status");
+    return { success: false, queue: [], error: `API returned status ${response.status}` };
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    logger.error("Campaign queue API returned non-JSON response");
+    return { success: false, queue: [], error: "API returned non-JSON response" };
+  }
+
   logger.info(`API status: ${response.status}`);
 
   if (!data.success) {
-    logger.error("API error:", data.error || data);
+    logger.error({ error: data.error || data }, "Campaign queue API error");
     return { success: false, queue: [], error: data.error || "API returned success=false" };
   }
 
@@ -33,7 +45,7 @@ export async function fetchCampaigns(): Promise<{ success: boolean; queue: any[]
 export async function markRecipientsInQueue(recipientIds: string[]): Promise<void> {
   const { SUPABASE_URL, SUPABASE_KEY, API_KEY } = env();
 
-  await fetch(`${SUPABASE_URL}/functions/v1/get-campaign-queue`, {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/get-campaign-queue`, {
     method: "PUT",
     headers: {
       "x-api-key": API_KEY,
@@ -43,5 +55,9 @@ export async function markRecipientsInQueue(recipientIds: string[]): Promise<voi
     body: JSON.stringify({ recipient_ids: recipientIds, status: "in_queue" }),
   });
 
-  logger.info(`Marked ${recipientIds.length} as in_queue`);
+  if (!res.ok) {
+    logger.warn({ status: res.status }, "Failed to mark recipients as in_queue");
+  } else {
+    logger.info(`Marked ${recipientIds.length} as in_queue`);
+  }
 }
