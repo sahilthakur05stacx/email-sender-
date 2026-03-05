@@ -536,12 +536,57 @@ Scheduler correctly:
 - Passed dedup check (no emails sent today)
 - Built email payloads and POSTed to n8n
 
+### Test 2: Reply Stops Sequence — PASSED
+
+**Setup:** Kumar Saini received Step 1. Called `update-recipient-status` with `status: "replied"` via email.
+
+**Result:**
+- Kumar's status changed to `replied`
+- Scheduler returned `pending_count: 0` — Kumar was NOT picked up
+- Edge function query `.eq("status", "pending")` correctly excluded him
+
+**Key finding:** `update-recipient-status` called via `email` does NOT trigger `advanceStep()` — only the `recipient_id` path does. n8n must use `recipient_id` (which the scheduler already sends in the payload).
+
+### Test 3: Wait Days Spacing (Part 1 — Skip) — PASSED
+
+**Setup:** Called `update-recipient-status` with `recipient_id` + `status: "sent"` for Simeon Prokopov.
+
+**advanceStep() result:**
+```
+current_step: 1 → 2
+status: sent → pending
+next_send_at: 2026-03-07T12:28:12Z (2 days from now, wait_days: 1)
+```
+
+**Scheduler run:** `pending_count: 0` — Simeon was NOT picked up because `next_send_at` (March 7) > now. Wait days enforcement works.
+
+### Test 3b: Wait Days Spacing (Part 2 — Send) — PASSED
+
+**Setup:** Manually set Simeon's `next_send_at` to yesterday (March 4) so wait period has passed.
+
+**Result:**
+```
+pending_count: 1
+Step: 2/4
+Template: Follow-Up
+Sent: 1
+```
+
+- Edge function correctly returned Simeon (next_send_at <= now)
+- Scheduler correctly selected Step 2 template ("Follow-Up")
+- Email sent to n8n
+
+**Full wait days cycle verified:**
+```
+Step 1 sent → advanceStep() → step: 2, next_send_at: +1 day, status: pending
+Scheduler (before next_send_at) → SKIPPED (next_send_at > now)
+Scheduler (after next_send_at)  → Step 2 "Follow-Up" SENT
+```
+
 ### Tests Still Needed
 
 | Test | What to Verify | How to Test |
 |---|---|---|
-| **Reply stops sequence** | If contact replies after Step 1, Step 2 should NOT be sent | 1. Send Step 1 (done). 2. Call `update-recipient-status` with `status: "replied"`. 3. Wait for `wait_days` to pass. 4. Run scheduler — recipient should NOT appear |
-| **Wait days spacing** | Step 2 should only send after `wait_days` from Step 1 | 1. After Step 1 is sent, check `next_send_at` is set correctly. 2. Run scheduler before `next_send_at` — should skip. 3. Run scheduler after `next_send_at` — should send Step 2 |
 | **Daily limit enforcement** | Sender should stop after hitting daily limit | 1. Set sender `daily_limit: 1`. 2. Run scheduler with 2 recipients — only 1 should send |
 | **Cross-campaign dedup** | Same contact in 2 campaigns should only get 1 email per day | 1. Add same contact to 2 active campaigns. 2. Run scheduler — first campaign sends, second campaign skips that contact |
 | **Sending window skip** | Contacts outside time window should be skipped and reset to pending | 1. Set contact `time_from: 01:00`, `time_to: 02:00` (outside current time). 2. Run scheduler — should skip and reset to pending |
