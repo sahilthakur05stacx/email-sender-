@@ -1,4 +1,4 @@
-import { env, writeSchedulerLog, getSenderTodayCount } from "../db/client";
+import { env, writeSchedulerLog, getSenderTodayCount, resetStaleRecipients } from "../db/client";
 import { fetchCampaigns, markRecipientsInQueue } from "./fetchCampaigns";
 import { isWithinSendingWindow, getTemplateForStep, generateTracking } from "../utils/helpers";
 import { logger } from "../utils/logger";
@@ -31,6 +31,9 @@ export async function runScheduler() {
   logger.info("Cron job triggered!");
 
   try {
+    // Step 0: Reset any recipients stuck as "in_queue" from a previous crashed run
+    await resetStaleRecipients();
+
     // Step 1: Fetch active campaigns
     const { success, queue, error } = await fetchCampaigns();
 

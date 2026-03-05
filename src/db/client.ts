@@ -52,6 +52,34 @@ export async function writeSchedulerLog(log: {
   }
 }
 
+/** Reset recipients stuck as "in_queue" for more than 30 minutes back to "pending" */
+export async function resetStaleRecipients(): Promise<number> {
+  try {
+    const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const res = await supabaseFetch(
+      `/rest/v1/campaign_recipients?status=eq.in_queue&updated_at=lt.${thirtyMinAgo}`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ status: "pending" }),
+      },
+    );
+    if (!res.ok) {
+      logger.warn({ status: res.status }, "Failed to reset stale recipients");
+      return 0;
+    }
+    const rows = await res.json();
+    const count = Array.isArray(rows) ? rows.length : 0;
+    if (count > 0) {
+      logger.info({ count }, "Reset stale in_queue recipients back to pending");
+    }
+    return count;
+  } catch (err) {
+    logger.error({ err }, "Failed to reset stale recipients");
+    return 0;
+  }
+}
+
 /** Get how many emails this sender has already sent today (across all their campaigns) */
 export async function getSenderTodayCount(senderId: string): Promise<number> {
   const today = new Date();

@@ -165,6 +165,7 @@ pending ──→ in_queue ──→ sent ──→ completed
 | **step_entered_at column** | FR-19 | migration | Added to `campaign_recipients`, backfilled from `enrolled_at` |
 | **Error alerting stubs** | NFR 5.3 | `utils/alerts.ts` | `alertFailure()` wired into runner error paths |
 | **Distributed lock stubs** | NFR 5.2 | `utils/lock.ts` | API ready for Redis/pg swap |
+| **Stale queue cleanup** | NFR 5.2 | `db/client.ts` | `resetStaleRecipients()` — resets `in_queue` > 30 min back to `pending` at start of each run |
 
 ### Still Missing (4 items)
 
@@ -173,7 +174,7 @@ pending ──→ in_queue ──→ sent ──→ completed
 | **Campaign date window** | FR-02 | No `end_date` column on campaigns, no date check in scheduler | Low — campaigns are manually paused/completed |
 | **Exclude unsubscribed/bounced/dnc** | FR-12, FR-13 | Filtering delegated to edge function, not verified locally | Low — edge function handles it |
 | **Exclude already-emailed-today** | FR-14 | Not checked in scheduler (edge function may handle) | Low — edge function handles it |
-| **Stale queue cleanup (idempotency)** | NFR 5.2 | If crash mid-run, `in_queue` recipients get stuck forever | Medium — no crashes yet, but should fix |
+| ~~**Stale queue cleanup (idempotency)**~~ | ~~NFR 5.2~~ | ~~Moved to Implemented~~ | ~~Done~~ |
 
 ### Deferred to Later Phase (11 items)
 
@@ -360,9 +361,7 @@ ALTER TABLE campaigns ADD COLUMN end_date TIMESTAMPTZ;
 5. ~~Implement sequence priority sorting~~ (step DESC, entered ASC, contact_id ASC)
 6. ~~Replace console logger with Pino~~ (structured JSON, `pino-pretty` for dev)
 
-### Nice to Have (when time permits)
-
-7. **Stale queue cleanup** — reset `in_queue` recipients stuck > 30 min back to `pending`
+7. ~~Stale queue cleanup~~ — `resetStaleRecipients()` resets stuck `in_queue` > 30 min back to `pending`
 
 ### Deferred — Later Phase (when volume grows)
 
