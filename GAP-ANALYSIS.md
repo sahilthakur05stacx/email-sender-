@@ -1,7 +1,7 @@
 # Gap Analysis — Existing Code & DB vs SRS v1.0
 
 > Last updated: March 5, 2026
-> Compared against: outreach-vibe Supabase schema + email-sender/src/scheduler.ts
+> Compared against: outreach-vibe Supabase schema + email-sender/src/ (modular structure)
 
 ---
 
@@ -16,7 +16,7 @@
 | **Daily sender limit** (FR-06, FR-07) | Partial | `daily_limit` checked, but counted from `email_logs.created_at` — no `emails_sent_today` column on senders table |
 | **Sending window check** (FR-04) | Done | `isWithinSendingWindow()` works with per-contact `time_from`/`time_to` from contacts table |
 | **Template resolution** (FR-15) | Done | `getTemplateForStep()` handles resolved templates + fallback + randomize |
-| **Skip if previous run in progress** | Partial | In-memory `isRunning` flag — NOT a distributed lock (fails on restart/multi-instance) |
+| **Skip if previous run in progress** | Partial | `utils/lock.ts` with `acquireLock()`/`releaseLock()` — in-memory (swap to Redis/pg for multi-instance) |
 | **Tracking integration** | Done | `generateTracking()` calls tracking API with open/click/unsubscribe support |
 | **n8n webhook dispatch** | Done | Sends email payload to n8n for actual delivery |
 | **Recipient status update** | Done | Marks recipients as `in_queue` before sending to prevent duplicates |
@@ -36,10 +36,10 @@
 | **Campaign date window** | FR-02 | MUST | No `start_date`/`end_date` validation — `campaigns.end_date` column doesn't even exist |
 | **Exclude unsubscribed/bounced/dnc** | FR-12, FR-13 | MUST | Filtering delegated entirely to the edge function — not verified locally in scheduler |
 | **Exclude already-emailed-today** | FR-14 | MUST | Not checked in scheduler code (edge function may handle it) |
-| **Structured logging (Pino)** | NFR 5.3 | MUST | Uses raw `console.log` with emojis and PII (contact emails in logs) — no structured JSON logging |
-| **Distributed lock** | NFR 5.2 | MUST | Only in-memory `isRunning` — doesn't survive restarts or multiple instances |
+| **Structured logging (Pino)** | NFR 5.3 | Partial | `utils/logger.ts` wrapper in place — currently console, Pino swap is drop-in |
+| **Distributed lock** | NFR 5.2 | Partial | `utils/lock.ts` with `acquireLock()`/`releaseLock()` API — currently in-memory, Redis/pg swap is drop-in |
 | **DB transactions / idempotency** | NFR 5.2 | MUST | No transaction wrapping — crash mid-run can create duplicate queue entries |
-| **Error alerting (Slack)** | NFR 5.3 | MUST | No Slack webhook or alert mechanism for critical errors |
+| **Error alerting (Slack)** | NFR 5.3 | Partial | `utils/alerts.ts` stubs wired into runner error paths — needs Slack webhook |
 | **Warmup ramp support** | FR-11 | SHOULD | No `warmup_ramp` logic — `senders.warmup_status` exists as text but is unused by scheduler |
 | **Per-contact opt-out preferences** | FR-16 | SHOULD | Not implemented |
 | **Per-step reply-to/from-name** | FR-26 | SHOULD | Not implemented |
@@ -191,20 +191,28 @@ These are tables you already have that the SRS doesn't mention but are relevant:
 
 ## 5. FILE STRUCTURE — Current vs Required
 
+> **STATUS: DONE** — Restructured from single `scheduler.ts` into modular files.
+
 ```
-CURRENT:                          SRS REQUIRED:
-src/                              src/
-  scheduler.ts  (everything)        scheduler/
-                                      index.ts        <- Entry point, cron setup
-                                      runner.ts       <- Main orchestrator (steps 1-6)
-                                      fetchCampaigns.ts
-                                    db/
-                                      client.ts       <- Supabase/pg connection
-                                    utils/
-                                      logger.ts       <- Pino structured logger
-                                      lock.ts         <- Distributed run lock
-                                      alerts.ts       <- Slack/email alerting
+CURRENT (IMPLEMENTED):                SRS REQUIRED:
+src/                                  src/
+  scheduler/                            scheduler/
+    index.ts    ← Entry point, cron       index.ts        ✅
+    runner.ts   ← Main orchestrator       runner.ts       ✅
+    fetchCampaigns.ts                     fetchCampaigns.ts ✅
+  db/                                   db/
+    client.ts   ← Supabase connection     client.ts       ✅
+  utils/                                utils/
+    logger.ts   ← Console (Pino-ready)    logger.ts       ✅ (console wrapper, swap to Pino later)
+    lock.ts     ← In-memory lock          lock.ts         ✅ (in-memory, swap to Redis/pg later)
+    alerts.ts   ← Alert stubs            alerts.ts       ✅ (stubs, wire to Slack later)
 ```
+
+### Key Design Decisions:
+- **Lazy env vars**: `db/client.ts` exports `env()` function (not top-level constants) so `dotenv.config()` runs first
+- **Lock module**: `acquireLock()`/`releaseLock()` API ready for Redis swap — no changes needed in runner
+- **Logger interface**: `.info()/.warn()/.error()` matches Pino API — drop-in replacement later
+- **fetchCampaigns.ts**: Extracted campaign fetch + `markRecipientsInQueue()` from runner for single-responsibility
 
 ---
 
@@ -302,13 +310,13 @@ CREATE INDEX idx_email_queue_status ON email_queue(status);
 ## 8. TOP PRIORITIES — Fix Order
 
 1. ~~**CRITICAL: Move hardcoded secrets to `.env`**~~ — DONE
-2. **Create `scheduler_logs` table** — log every run to DB for auditing
-3. **Add missing columns** — `emails_sent_today`, `last_reset_date`, `step_entered_at`, `end_date`
-4. **Implement sequence priority sorting** — sort by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC`
-5. **Add `scheduler_logs`** — log every run to DB
-7. **Replace `console.log` with Pino** — structured JSON logging, no PII
-8. **Add distributed lock** — replace in-memory `isRunning` with DB advisory lock
-9. **Add Slack alerting** — notify on critical errors
+2. ~~**Restructure into modular files**~~ — DONE (`scheduler/`, `db/`, `utils/` with lazy env, lock, alerts)
+3. **Create `scheduler_logs` table** — log every run to DB for auditing
+4. **Add missing columns** — `emails_sent_today`, `last_reset_date`, `step_entered_at`, `end_date`
+5. **Implement sequence priority sorting** — sort by `current_step DESC`, `step_entered_at ASC`, `contact_id ASC`
+6. **Replace console logger with Pino** — `utils/logger.ts` interface is ready, swap implementation
+7. **Replace in-memory lock with Redis/pg** — `utils/lock.ts` API is ready, swap implementation
+8. **Wire Slack alerting** — `utils/alerts.ts` stubs are wired into runner, add Slack webhook POST
 
 ### Deferred to Later Phase
 - **email_queue table** (Section 4.5) — dispatch queue between scheduler and n8n. Deferred — `email_logs` + `campaign_recipients` already track emails at current volume

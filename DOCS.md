@@ -136,7 +136,7 @@ time_to   = null
 → n8n timezone workflow must set time_from/time_to first
 ```
 
-### Code Logic (scheduler.ts):
+### Code Logic (utils/helpers.ts):
 ```ts
 const now = new Date();
 const currentMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
@@ -622,7 +622,7 @@ The `step_entered_at` column on `campaign_recipients` tracks when a contact move
 - **Existing contacts**: backfilled from `enrolled_at`
 - **Step change**: should be updated to `now()` when `current_step` changes
 
-### Code (scheduler.ts):
+### Code (scheduler/runner.ts):
 
 ```ts
 campaign.pending_recipients.sort((a, b) => {
@@ -645,15 +645,65 @@ campaign.pending_recipients.sort((a, b) => {
 
 ## File Reference
 
+### Project Structure
+
+```
+src/
+  scheduler/
+    index.ts            ← Entry point: dotenv, env validation, cron setup
+    runner.ts           ← Main runScheduler() orchestrator (steps 1–6)
+    fetchCampaigns.ts   ← Fetch active campaigns + mark recipients in_queue
+  db/
+    client.ts           ← Supabase config, env(), supabaseFetch(), writeSchedulerLog(), getSenderTodayCount()
+  utils/
+    logger.ts           ← Console logger wrapper (.info/.warn/.error with ISO timestamps)
+    lock.ts             ← Distributed run lock (in-memory now, Redis-swappable later)
+    alerts.ts           ← Slack/email alerting stubs (alertFailure, alertDailyDigest)
+.env                    ← Environment variables (secrets — never committed)
+.env.example            ← Template for required env vars
+package.json            ← start script: ts-node src/scheduler/index.ts
+```
+
+### File Details
+
 | File | Purpose |
 |---|---|
-| `src/scheduler.ts` | Main scheduler — cron job, daily limit, sending window, logging |
+| `src/scheduler/index.ts` | Entry point — loads dotenv, validates env vars, starts cron schedule |
+| `src/scheduler/runner.ts` | Main orchestrator — acquires lock, fetches campaigns, processes recipients, sends to n8n, writes logs |
+| `src/scheduler/fetchCampaigns.ts` | Fetches active campaigns from Supabase edge function, marks recipients as `in_queue` |
+| `src/db/client.ts` | Supabase connection — `env()` for lazy env vars, `supabaseFetch()` wrapper, `writeSchedulerLog()`, `getSenderTodayCount()` |
+| `src/utils/logger.ts` | Logger wrapper — `.info()`, `.warn()`, `.error()` with ISO timestamp prefix (swap to Pino later) |
+| `src/utils/lock.ts` | Run lock — `acquireLock()`, `releaseLock()`, `isLocked()` (swap to Redis/pg advisory lock later) |
+| `src/utils/alerts.ts` | Alert stubs — `alertFailure()`, `alertDailyDigest()` (wire to Slack webhook later) |
 | `.env` | Environment variables (secrets — never committed) |
 | `.env.example` | Template for required env vars |
-| `supabase/functions/get-campaign-queue/index.ts` | Fetches pending recipients with contact data |
-| `supabase/functions/update-recipient-status/index.ts` | Updates recipient status after send |
+
+### External Dependencies
+
+| Resource | Purpose |
+|---|---|
+| `supabase/functions/get-campaign-queue` | Edge function — fetches pending recipients with contact data |
+| `supabase/functions/update-recipient-status` | Edge function — updates recipient status after send |
 | `contacts` table | Stores `time_from`, `time_to`, `email` per contact |
 | `senders` table | Stores `daily_limit` per sender |
 | `email_logs` table | Tracks every email sent (used for daily limit count) |
 | `campaign_recipients` table | Tracks each contact's progress in a campaign (`current_step`, `step_entered_at`) |
 | `scheduler_logs` table | Audit log — one row per scheduler run |
+
+### Import Graph
+
+```
+scheduler/index.ts
+  └── scheduler/runner.ts
+        ├── scheduler/fetchCampaigns.ts
+        │     └── db/client.ts
+        │           └── utils/logger.ts
+        ├── db/client.ts
+        ├── utils/helpers.ts
+        │     ├── db/client.ts
+        │     └── utils/logger.ts
+        ├── utils/logger.ts
+        ├── utils/lock.ts
+        └── utils/alerts.ts
+              └── utils/logger.ts
+```
