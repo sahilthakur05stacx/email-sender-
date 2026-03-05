@@ -615,11 +615,43 @@ Sent: 1, Skipped: 1
 
 **Bug found & fixed:** Edge function `get-campaign-queue` was not returning `time_from`/`time_to` in contact data when `resolve=true`. Fixed by adding them to `requiredContactCols` in `fetchCampaignRecipients()`. Edge function redeployed.
 
+### Test 6: Daily Limit Enforcement — PASSED
+
+**Setup:** Sender `daily_limit: 1`. Both Kumar and Simeon set to `pending`. Campaign `sender_id` linked to senders table.
+
+**Bug found & fixed:** Edge function was not enriching `campaign.sender` with `daily_limit` and `id` from the `senders` table. The inline `sender` JSON on campaigns only had `{name, email, replyTo}`. Fixed by:
+1. Adding `daily_limit` to `fetchSender()` select query
+2. Enriching the sender object in the queue response when `sender_id` is set
+3. Setting `sender_id` on the test campaign to link it to the senders table
+
+**Result:**
+```
+Daily Limit: 1 | Sent Today: 0 | Remaining: 1
+Trimmed to 1 recipient(s) to stay within daily limit
+Contact: Kumar Saini — sent
+Sent: 1, Skipped: 0
+```
+
+- 2 pending recipients found, trimmed to 1 due to daily limit
+- Only Kumar sent, Simeon excluded from processing
+
+### Test 7: Bounce Stops Sequence — PASSED
+
+**Setup:** Kumar set to `status: "bounced"`. Simeon set to `status: "pending"`.
+
+**Result:**
+```
+pending_count: 1 (only Simeon)
+Contact: Simeon Prokopov — sent
+Sent: 1
+```
+
+- Kumar (bounced) was NOT returned by the edge function — filtered at the DB level (`status=eq.pending`)
+- Only Simeon (pending) was picked up and sent
+
 ### Tests Still Needed
 
 | Test | What to Verify | How to Test |
 |---|---|---|
-| **Daily limit enforcement** | Sender should stop after hitting daily limit | 1. Set sender `daily_limit: 1`. 2. Run scheduler with 2 recipients — only 1 should send |
 | **Cross-campaign dedup** | Same contact in 2 campaigns should only get 1 email per day | 1. Add same contact to 2 active campaigns. 2. Run scheduler — first campaign sends, second campaign skips that contact |
-| **Bounce stops sequence** | Bounced contact should not receive further emails | 1. Set recipient status to "bounced". 2. Run scheduler — should not appear |
-| **Stale queue cleanup** | Recipients stuck as `in_queue` > 30 min should be reset | 1. Manually set recipient to `in_queue` with old `updated_at`. 2. Run scheduler — Step 0 should reset them |
+| **Stale queue cleanup** | Recipients stuck as `in_queue` > 30 min should be reset | 1. Manually set recipient to `in_queue` with old `updated_at`. 2. Run scheduler — Step 0 should reset them. **Note:** Requires direct DB access to bypass Supabase `updated_at` auto-trigger. Code reviewed and logic is correct. |
