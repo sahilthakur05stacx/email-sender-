@@ -22,6 +22,25 @@ export async function runScheduler() {
   }
 
   const runStartedAt = new Date();
+
+  // Skip weekends (Saturday = 6, Sunday = 0)
+  const dayOfWeek = runStartedAt.getUTCDay();
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    logger.info(`Cron skipped — weekend (${dayOfWeek === 0 ? "Sunday" : "Saturday"} UTC)`);
+    await writeSchedulerLog({
+      run_at: runStartedAt.toISOString(),
+      campaigns_processed: 0,
+      total_slots_available: 0,
+      total_emails_sent: 0,
+      total_skipped: 0,
+      duration_ms: 0,
+      status: "skipped",
+      error: "Weekend — no emails sent",
+    });
+    releaseLock();
+    return;
+  }
+
   let campaignsProcessed = 0;
   let totalSlotsAvailable = 0;
   let totalEmailsSent = 0;
