@@ -122,13 +122,13 @@ export async function getSenderTodayCount(senderId: string): Promise<number> {
 
     const campaignIds = campaigns.map((c: any) => c.id).join(",");
 
-    // Step 2: Count email_logs sent today for those campaigns
-    const logsRes = await supabaseFetch(
-      `/rest/v1/email_logs?select=id&campaign_id=in.(${campaignIds})&created_at=gte.${todayISO}&status=neq.queued`,
+    // Step 2: Count email_sent events today for those campaigns
+    const eventsRes = await supabaseFetch(
+      `/rest/v1/email_events?select=id&campaign_id=in.(${campaignIds})&created_at=gte.${todayISO}&event_type=eq.email_sent`,
       { headers: { Prefer: "count=exact" } },
     );
 
-    const contentRange = logsRes.headers.get("content-range");
+    const contentRange = eventsRes.headers.get("content-range");
     if (contentRange) {
       const total = contentRange.split("/")[1];
       return parseInt(total) || 0;
